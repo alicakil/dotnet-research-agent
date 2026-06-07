@@ -17,17 +17,20 @@ public sealed class GroqAdapter : IAiProviderAdapter
     private readonly HttpClient _httpClient;
     private readonly AiOptions _options;
     private readonly ILogger<GroqAdapter> _logger;
+    private readonly IAiRateLimitTracker _rateLimitTracker;
     private readonly string? _apiKey;
 
     public GroqAdapter(
         HttpClient httpClient,
         IOptions<AiOptions> options,
         IConfiguration configuration,
+        IAiRateLimitTracker rateLimitTracker,
         ILogger<GroqAdapter> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _logger = logger;
+        _rateLimitTracker = rateLimitTracker;
         _apiKey = configuration["Ai:Groq:ApiKey"]
             ?? Environment.GetEnvironmentVariable("GROQ_API_KEY");
     }
@@ -66,6 +69,7 @@ public sealed class GroqAdapter : IAiProviderAdapter
 
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
+        _rateLimitTracker.Record(AiProvider.Groq, response.Headers); // canlı rate-limit (kalan/reset) yakala
 
         if (!response.IsSuccessStatusCode)
         {
