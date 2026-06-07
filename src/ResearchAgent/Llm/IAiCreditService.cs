@@ -20,4 +20,7 @@ public interface IAiCreditService
 
     /// <summary>Başarısız çağrı: kredi DÜŞÜLMEZ; ledger'a 0-kredili hata satırı yazılır (audit/debug).</summary>
     Task RecordFailureAsync(string tenantId, Guid userId, AiTaskType taskType, string? error, CancellationToken cancellationToken = default);
+
+    /// <summary>Tenant'ın kalan AI kredisi (allowance + purchased). Salt-okunur; cüzdan yoksa varsayılan aylık hak döner.</summary>
+    Task<int> GetRemainingCreditsAsync(string tenantId, CancellationToken cancellationToken = default);
 }
