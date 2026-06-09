@@ -1,13 +1,12 @@
 namespace WebApi.Services.Ai;
 
 /// <summary>
-/// Somut LLM sağlayıcısı. Metering (tenant-başı kullanım kaydı) ve routing (fallback) bu değere
-/// göre yapılır. Test fazı: Gemini (primary) + Groq (fallback). Prod'da gerçek hasta verisi olan
-/// özellikler için Bedrock-Claude (AB ikametgâhı, GDPR) Faz 4'te eklenir.
+/// Somut LLM sağlayıcısı. Metering (tenant-başı kullanım kaydı) ve routing (fallback) bu değere göre
+/// yapılır. Şu an: Groq (ücretsiz, primary) + Gemini (opsiyonel fallback). Yeni sağlayıcı gerektiğinde
+/// (örn. Claude/OpenAI doğrudan API) buraya +1 değer ve bir adapter eklenir — seam esnek, plan basit.
 /// </summary>
 public enum AiProvider
 {
     Gemini = 1,
     Groq = 2,
-    BedrockClaude = 3,
 }

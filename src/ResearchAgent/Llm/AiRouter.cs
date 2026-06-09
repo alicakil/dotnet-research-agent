@@ -84,9 +84,18 @@ public sealed class AiRouter : IAiCompletionService
             }
         }
 
-        // 5. Hepsi başarısız → kredi DÜŞÜLMEZ, ledger'a hata satırı yaz, hata fırlat.
+        // 5. Hepsi başarısız → kredi DÜŞÜLMEZ, ledger'a hata satırı yaz, DOSTÇA hata fırlat (kullanıcıya gider).
         await _creditService.RecordFailureAsync(tenantId, userId, request.TaskType, lastError?.Message, cancellationToken);
+
+        var errText = lastError?.Message ?? string.Empty;
+        var isRateLimited = errText.Contains("429") || errText.Contains("rate_limit", StringComparison.OrdinalIgnoreCase);
+        var isDailyQuota = errText.Contains("per day", StringComparison.OrdinalIgnoreCase) || errText.Contains("(TPD)", StringComparison.OrdinalIgnoreCase);
         throw new AiCompletionFailedException(
-            $"Tüm AI sağlayıcılar başarısız (task={request.TaskType}).", lastError);
+            isDailyQuota
+                ? "AI servisinin günlük ücretsiz kotası doldu; yarın yenilenir. (Daha fazlası için kredi paketleri yakında.)"
+                : isRateLimited
+                    ? "AI servisi şu an çok yoğun (dakikalık hız sınırı). Lütfen birkaç saniye sonra tekrar deneyin."
+                    : "AI servisi geçici olarak kullanılamıyor. Lütfen biraz sonra tekrar deneyin.",
+            lastError);
     }
 }
