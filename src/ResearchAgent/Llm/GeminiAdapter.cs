@@ -5,9 +5,10 @@ using Microsoft.Extensions.Options;
 namespace WebApi.Services.Ai;
 
 /// <summary>
-/// Google Gemini (Generative Language API) adapter'ı — test fazı primary sağlayıcı.
-/// Ücretsiz tier üzerinden çalışır; API anahtarı SSM→env (<c>GEMINI_API_KEY</c>) ile gelir.
-/// Yalnızca SENTETİK / test-tenant verisiyle kullanılır (GDPR: gerçek hasta verisi prod'da Bedrock-Claude'a gider).
+/// Google Gemini (Generative Language API) adapter'ı — ücretsiz fallback sağlayıcı (policy Groq-first).
+/// Ücretsiz tier; STANDART <c>AIza…</c> key gerekir (Ai:Gemini:ApiKey / GEMINI_API_KEY), SSM→env. NOT: AQ. formatı
+/// uyumsuz ("Multiple authentication credentials"). Free tier prompt'ları eğitimde kullanabilir → şimdilik gated
+/// test/demo (pseudonymized) için; gerçek-veri prod'da paid/Vertex (DPA + no-training) ya da DPA'lı başka provider.
 /// </summary>
 public sealed class GeminiAdapter : IAiProviderAdapter
 {
