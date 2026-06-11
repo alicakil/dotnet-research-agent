@@ -31,7 +31,7 @@ public sealed class AiAgentResult
 
 public sealed class AiAgentRunner : IAiAgentRunner
 {
-    private const int MaxIterations = 5;   // güvenlik tavanı (sonsuz araç-döngüsünü kes)
+    private const int MaxIterations = 8;   // güvenlik tavanı (sonsuz araç-döngüsünü kes; admin SQL birkaç tur sürebilir)
 
     private readonly IEnumerable<IAiProviderAdapter> _adapters;
     private readonly AiOptions _options;
@@ -73,6 +73,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
                 Messages = messages,
                 Tools = tools.Count > 0 ? tools : null,
                 MaxOutputTokens = policy.MaxOutputTokens,
+                Model = policy.Model,
             };
 
             var result = await CallWithFallbackAsync(policy, req, cancellationToken);

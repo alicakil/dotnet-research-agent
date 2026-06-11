@@ -111,7 +111,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         if (!IsConfigured)
             throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
-        var model = _options.OpenAI.Model;
+        var model = request.Model ?? _options.OpenAI.Model;   // policy override (ör. admin → gpt-5)
         var body = new Dictionary<string, object?>
         {
             ["model"] = model,

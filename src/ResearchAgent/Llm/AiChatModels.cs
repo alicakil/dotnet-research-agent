@@ -45,6 +45,8 @@ public sealed class AiChatRequest
     public required IReadOnlyList<AiChatMessage> Messages { get; init; }
     public IReadOnlyList<AiToolDefinition>? Tools { get; init; }
     public int? MaxOutputTokens { get; init; }
+    /// <summary>OpenAI model override (policy'den; null → adapter varsayılanı).</summary>
+    public string? Model { get; init; }
 }
 
 /// <summary>Tool-calling sonucu: ya final <see cref="Text"/>, ya da <see cref="ToolCalls"/> (araç talebi).</summary>
