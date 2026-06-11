@@ -6,45 +6,43 @@ using Microsoft.Extensions.Options;
 namespace WebApi.Services.Ai;
 
 /// <summary>
-/// Groq (OpenAI-uyumlu chat completions) adapter'ı — test fazı fallback sağlayıcı.
-/// Çok hızlı (300+ tok/s), ücretsiz tier; API anahtarı SSM→env (<c>GROQ_API_KEY</c>) ile gelir.
-/// Gemini başarısız/kota-dolu olduğunda <see cref="AiRouter"/> buraya düşer.
+/// OpenAI (Chat Completions) adapter'ı — go-live primary sağlayıcı (paid). Varsayılan model gpt-5-mini.
+/// OpenAI-uyumlu şema (GroqAdapter ile aynı body); farklar: api.openai.com endpoint + <c>max_completion_tokens</c>
+/// (GPT-5/o-serisi max_tokens kabul etmez). API anahtarı SSM→env (<c>Ai:OpenAI:ApiKey</c> / <c>OPENAI_API_KEY</c>).
+/// Key yoksa IsConfigured=false → AiRouter otomatik Groq (ücretsiz) fallback'ine düşer.
 /// </summary>
-public sealed class GroqAdapter : IAiProviderAdapter
+public sealed class OpenAIAdapter : IAiProviderAdapter
 {
-    private const string Endpoint = "https://api.groq.com/openai/v1/chat/completions";
+    private const string Endpoint = "https://api.openai.com/v1/chat/completions";
 
     private readonly HttpClient _httpClient;
     private readonly AiOptions _options;
-    private readonly ILogger<GroqAdapter> _logger;
-    private readonly IAiRateLimitTracker _rateLimitTracker;
+    private readonly ILogger<OpenAIAdapter> _logger;
     private readonly string? _apiKey;
 
-    public GroqAdapter(
+    public OpenAIAdapter(
         HttpClient httpClient,
         IOptions<AiOptions> options,
         IConfiguration configuration,
-        IAiRateLimitTracker rateLimitTracker,
-        ILogger<GroqAdapter> logger)
+        ILogger<OpenAIAdapter> logger)
     {
         _httpClient = httpClient;
         _options = options.Value;
         _logger = logger;
-        _rateLimitTracker = rateLimitTracker;
-        _apiKey = configuration["Ai:Groq:ApiKey"]
-            ?? Environment.GetEnvironmentVariable("GROQ_API_KEY");
+        _apiKey = configuration["Ai:OpenAI:ApiKey"]
+            ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
     }
 
-    public AiProvider Provider => AiProvider.Groq;
+    public AiProvider Provider => AiProvider.OpenAI;
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
 
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
-            throw new InvalidOperationException("Groq API anahtarı tanımlı değil (Ai:Groq:ApiKey / GROQ_API_KEY).");
+            throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
-        var model = _options.Groq.Model;
+        var model = _options.OpenAI.Model;
         var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);
 
         var messages = new List<object>();
@@ -56,11 +54,12 @@ public sealed class GroqAdapter : IAiProviderAdapter
         {
             ["model"] = model,
             ["messages"] = messages,
+            ["reasoning_effort"] = "minimal",   // gpt-5-mini reasoning'i kıs → hızlı (25s timeout + prod 30s API-GW altında) + ucuz; grounded iş reasoning gerektirmez
         };
         if (request.MaxOutputTokens is int maxTokens)
-            body["max_tokens"] = maxTokens;
+            body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
         if (!string.IsNullOrWhiteSpace(request.ResponseJsonSchema))
-            body["response_format"] = new { type = "json_object" };
+            body["response_format"] = new { type = "json_object" };   // prompt "JSON" içermeli (OpenAI şartı)
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint);
         httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey!); // IsConfigured guard ile non-null garanti
@@ -69,20 +68,19 @@ public sealed class GroqAdapter : IAiProviderAdapter
 
         using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
-        _rateLimitTracker.Record(AiProvider.Groq, response.Headers); // canlı rate-limit (kalan/reset) yakala
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("Groq çağrısı başarısız ({Status}): {Body}",
+            _logger.LogWarning("OpenAI çağrısı başarısız ({Status}): {Body}",
                 (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
-            throw new HttpRequestException($"Groq {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
+            throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
         }
 
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
         if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-            throw new HttpRequestException($"Groq boş yanıt döndürdü: {AiAdapterHelpers.Truncate(json)}");
+            throw new HttpRequestException($"OpenAI boş yanıt döndürdü: {AiAdapterHelpers.Truncate(json)}");
 
         var text = string.Empty;
         if (choices[0].TryGetProperty("message", out var message) &&
@@ -101,7 +99,7 @@ public sealed class GroqAdapter : IAiProviderAdapter
         return new AiCompletionResult
         {
             Text = text,
-            Provider = AiProvider.Groq,
+            Provider = AiProvider.OpenAI,
             Model = model,
             Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
         };

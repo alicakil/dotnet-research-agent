@@ -9,4 +9,5 @@ public enum AiProvider
 {
     Gemini = 1,
     Groq = 2,
+    OpenAI = 3,
 }

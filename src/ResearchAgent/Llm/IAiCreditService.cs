@@ -23,4 +23,7 @@ public interface IAiCreditService
 
     /// <summary>Tenant'ın kalan AI kredisi (allowance + purchased). Salt-okunur; cüzdan yoksa varsayılan aylık hak döner.</summary>
     Task<int> GetRemainingCreditsAsync(string tenantId, CancellationToken cancellationToken = default);
+
+    /// <summary>Bir-kerelik satın alım/grant: PurchasedRemaining'e kredi ekler (reset yok, devreder; tarifeden bağımsız). Model A.</summary>
+    Task GrantPurchasedCreditsAsync(string tenantId, int amount, CancellationToken cancellationToken = default);
 }
