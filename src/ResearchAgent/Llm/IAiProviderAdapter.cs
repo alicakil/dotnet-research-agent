@@ -24,4 +24,12 @@ public interface IAiProviderAdapter
     /// fırlatır; router bunu yakalayıp bir sonraki sağlayıcıya geçer.
     /// </summary>
     Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Tool-calling (function-calling) çok-turlu sohbet — agentic akış (support chatbot). Yalnızca
+    /// OpenAI-uyumlu sağlayıcılar (OpenAI, Groq) implemente eder; diğerleri NotSupportedException fırlatır
+    /// (router uygun sağlayıcıyı seçer). Single-shot <see cref="CompleteAsync"/>'i etkilemez.
+    /// </summary>
+    Task<AiChatResult> CompleteChatAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+        => throw new NotSupportedException($"{Provider} tool-calling desteklemiyor (CompleteChatAsync).");
 }

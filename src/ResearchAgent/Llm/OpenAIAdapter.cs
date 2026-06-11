@@ -104,4 +104,39 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
         };
     }
+
+    /// <summary>Tool-calling çok-turlu sohbet (support chatbot). Aynı endpoint/şema; tools + tool_calls eklenir.</summary>
+    public async Task<AiChatResult> CompleteChatAsync(AiChatRequest request, CancellationToken cancellationToken = default)
+    {
+        if (!IsConfigured)
+            throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
+
+        var model = _options.OpenAI.Model;
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = model,
+            ["messages"] = AiAdapterHelpers.BuildChatMessages(request.Messages),
+            ["reasoning_effort"] = "minimal",
+        };
+        if (request.MaxOutputTokens is int maxTokens)
+            body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
+        if (request.Tools is { Count: > 0 })
+        {
+            body["tools"] = AiAdapterHelpers.BuildToolsArray(request.Tools);
+            body["tool_choice"] = "auto";
+        }
+
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint);
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey!);
+        httpRequest.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+
+        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("OpenAI chat çağrısı başarısız ({Status}): {Body}", (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
+            throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
+        }
+        return AiAdapterHelpers.ParseChatResult(json, AiProvider.OpenAI, model);
+    }
 }
