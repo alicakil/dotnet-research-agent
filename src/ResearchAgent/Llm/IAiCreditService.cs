@@ -21,6 +21,9 @@ public interface IAiCreditService
     /// <summary>Başarısız çağrı: kredi DÜŞÜLMEZ; ledger'a 0-kredili hata satırı yazılır (audit/debug).</summary>
     Task RecordFailureAsync(string tenantId, Guid userId, AiTaskType taskType, string? error, CancellationToken cancellationToken = default);
 
+    /// <summary>Metering'siz kullanım kaydı (public/admin chatbot — tenant YOK): kredi DÜŞÜLMEZ, sadece AiUsageLogs'a token/maliyet satırı (admin görünürlüğü).</summary>
+    Task RecordUsageOnlyAsync(string tenantId, Guid userId, AiTaskType taskType, AiCompletionResult result, CancellationToken cancellationToken = default);
+
     /// <summary>Tenant'ın kalan AI kredisi (allowance + purchased). Salt-okunur; cüzdan yoksa varsayılan aylık hak döner.</summary>
     Task<int> GetRemainingCreditsAsync(string tenantId, CancellationToken cancellationToken = default);
 
