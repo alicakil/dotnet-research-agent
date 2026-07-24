@@ -14,6 +14,7 @@ public sealed class AiRouter : IAiCompletionService
     private readonly AiOptions _options;
     private readonly TenantResolver _tenantResolver;
     private readonly IAiCreditService _creditService;
+    private readonly AiTraceContext _traceContext;
     private readonly ILogger<AiRouter> _logger;
 
     public AiRouter(
@@ -21,12 +22,14 @@ public sealed class AiRouter : IAiCompletionService
         IOptions<AiOptions> options,
         TenantResolver tenantResolver,
         IAiCreditService creditService,
+        AiTraceContext traceContext,
         ILogger<AiRouter> logger)
     {
         _adapters = adapters;
         _options = options.Value;
         _tenantResolver = tenantResolver;
         _creditService = creditService;
+        _traceContext = traceContext;
         _logger = logger;
     }
 
@@ -37,6 +40,12 @@ public sealed class AiRouter : IAiCompletionService
             ?? throw new InvalidOperationException("AI çağrısı için tenant context bulunamadı.");
         var tenantId = tenant.TenantId;
         var userId = _tenantResolver.GetUserId();
+
+        // İzlenebilirlik: kimliği ambient bağlama koy (oturumdan; anonim payload'a dokunmadan). ClientId/ContextKey
+        // varsa çağıran endpoint önceden set etmiştir — üzerine yazma. Fallback denemeleri aynı correlation'ı paylaşır.
+        _traceContext.TenantId = tenantId;
+        _traceContext.UserId = userId;
+        _traceContext.BeginOperation();
 
         var policy = _options.GetPolicy(request.TaskType);
 
