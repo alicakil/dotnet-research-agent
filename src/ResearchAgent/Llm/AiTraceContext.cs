@@ -15,6 +15,7 @@ public sealed class AiTraceContext
     public Guid? UserId { get; set; }
     public Guid? ClientId { get; set; }
     public string? ContextKey { get; set; }
+    public string? ConversationId { get; set; }
     public string? Surface { get; set; }
 
     /// <summary>Aynı mantıksal işlemin (fallback denemeleri) satırlarını gruplayan kimlik.</summary>

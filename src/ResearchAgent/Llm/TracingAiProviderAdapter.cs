@@ -99,6 +99,7 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
         UserId = _context.UserId,
         ClientId = _context.ClientId,
         ContextKey = _context.ContextKey,
+        ConversationId = _context.ConversationId,
         Surface = _context.Surface,
         TaskType = taskType.ToString(),
         Provider = _inner.Provider.ToString(),   // fallback denemesi başarısız olsa bile hangi sağlayıcı
