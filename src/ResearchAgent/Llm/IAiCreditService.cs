@@ -24,9 +24,30 @@ public interface IAiCreditService
     /// <summary>Metering'siz kullanım kaydı (public/admin chatbot — tenant YOK): kredi DÜŞÜLMEZ, sadece AiUsageLogs'a token/maliyet satırı (admin görünürlüğü).</summary>
     Task RecordUsageOnlyAsync(string tenantId, Guid userId, AiTaskType taskType, AiCompletionResult result, CancellationToken cancellationToken = default);
 
-    /// <summary>Tenant'ın kalan AI kredisi (allowance + purchased). Salt-okunur; cüzdan yoksa varsayılan aylık hak döner.</summary>
-    Task<int> GetRemainingCreditsAsync(string tenantId, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Tenant'ın kalan AI kredisi — iki kova AYRI döner (UI dürüstlüğü: "yanacak" ve "devreden" aynı
+    /// sayıda birleştirilirse raf ömrü sözü kullanıcıya görünmez olur). Salt-okunur; cüzdan yoksa
+    /// varsayılan aylık hak döner.
+    /// </summary>
+    Task<AiCreditBalanceSnapshot> GetBalanceAsync(string tenantId, CancellationToken cancellationToken = default);
 
-    /// <summary>Bir-kerelik satın alım/grant: PurchasedRemaining'e kredi ekler (reset yok, devreder; tarifeden bağımsız). Model A.</summary>
+    /// <summary>
+    /// Tek-seferlik top-up/grant: PurchasedRemaining'e kredi ekler (aylık reset yok, devreder; tarifeden
+    /// bağımsız) ve raf ömrünü baştan kurar. Kural: tekrarlayan ödeme → yanan kredi, tek seferlik → devreden.
+    /// </summary>
     Task GrantPurchasedCreditsAsync(string tenantId, int amount, CancellationToken cancellationToken = default);
+}
+
+/// <summary>
+/// Cüzdanın salt-okunur görüntüsü. <paramref name="AllowanceRemaining"/> dönem sonunda YANAR;
+/// <paramref name="PurchasedRemaining"/> devreder ama <paramref name="PurchasedExpiresAt"/>'te sona erer
+/// (kova boşsa null). Bkz. docs/wiki/ai-mimarisi.md §6.1.
+/// </summary>
+public readonly record struct AiCreditBalanceSnapshot(
+    int AllowanceRemaining,
+    int PurchasedRemaining,
+    DateTime? PurchasedExpiresAt)
+{
+    /// <summary>Harcanabilir toplam (her iki kova).</summary>
+    public int Total => AllowanceRemaining + PurchasedRemaining;
 }
