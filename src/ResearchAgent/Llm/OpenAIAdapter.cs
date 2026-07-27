@@ -54,7 +54,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         {
             ["model"] = model,
             ["messages"] = messages,
-            ["reasoning_effort"] = "minimal",   // gpt-5-mini reasoning'i kıs → hızlı (25s timeout + prod 30s API-GW altında) + ucuz; grounded iş reasoning gerektirmez
+            // Reasoning'i kıs → hızlı (25s timeout + prod 30s API-GW altında) + ucuz; grounded iş
+            // reasoning gerektirmez. Değer MODELE GÖRE: `minimal` yeni kuşakta 400 veriyor (bkz. helper).
+            ["reasoning_effort"] = AiAdapterHelpers.ResolveReasoningEffort(model),
         };
         if (request.MaxOutputTokens is int maxTokens)
             body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
@@ -112,17 +114,19 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
         var model = request.Model ?? _options.OpenAI.Model;   // policy override (ör. admin → gpt-5)
+        var hasTools = request.Tools is { Count: > 0 };
         var body = new Dictionary<string, object?>
         {
             ["model"] = model,
             ["messages"] = AiAdapterHelpers.BuildChatMessages(request.Messages),
-            ["reasoning_effort"] = "minimal",
+            // Araç varlığı değeri etkiler — yeni kuşak, tool'larla reasoning kabul etmiyor (bkz. helper).
+            ["reasoning_effort"] = AiAdapterHelpers.ResolveReasoningEffort(model, hasTools),
         };
         if (request.MaxOutputTokens is int maxTokens)
             body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
-        if (request.Tools is { Count: > 0 })
+        if (hasTools)
         {
-            body["tools"] = AiAdapterHelpers.BuildToolsArray(request.Tools);
+            body["tools"] = AiAdapterHelpers.BuildToolsArray(request.Tools!);
             body["tool_choice"] = "auto";
         }
 

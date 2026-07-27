@@ -8,6 +8,36 @@ namespace WebApi.Services.Ai;
 internal static class AiAdapterHelpers
 {
     /// <summary>
+    /// Modele göre `reasoning_effort` değeri. SABİT DEĞER GÖNDERİLEMEZ: `minimal` yalnızca gpt-5 /
+    /// gpt-5-mini kuşağında geçerli; gpt-5.4+ ve gpt-5.6 (sol/terra/luna) onu reddeder —
+    /// *"Unsupported value: 'reasoning_effort' does not support 'minimal' with this model.
+    /// Supported values are: 'none', 'low', 'medium', 'high', 'xhigh'"* → OpenAI **400**.
+    ///
+    /// Bu sessiz bir arıza türü: router 400'ü fallback sanıp Groq'a düşer, yanıt gelir, kimse
+    /// fark etmez — pinlenen pahalı model hiç kullanılmamış olur. (Tam olarak bu yaşandı:
+    /// gpt-5.6-terra pinlendiğinde her faturalama sohbeti llama'ya düştü; eval yakaladı.)
+    ///
+    /// Yeni kuşakta `low` seçiliyor, `none` değil: bir tık akıl yürütme yanıt kalitesine yarıyor,
+    /// `minimal`in amacı olan "hız + ucuzluk" ise `low` ile büyük ölçüde korunuyor.
+    ///
+    /// TEK İSTİSNA — <paramref name="hasTools"/>: yeni kuşak, function tool'larla birlikte
+    /// `/v1/chat/completions` üzerinde reasoning KABUL ETMİYOR:
+    /// *"Function tools with reasoning_effort are not supported for gpt-5.6-terra in
+    /// /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort
+    /// to 'none'."* → tool-calling yolunda `none` gönderilir. (Alternatif `/v1/responses`'a
+    /// taşınmaktı; ayrı bir API şeması demek — kazancı yokken yapılmadı.)
+    /// </summary>
+    public static string ResolveReasoningEffort(string? model, bool hasTools = false)
+    {
+        // gpt-5 ve gpt-5-mini (2025 kuşağı) `minimal` destekler; 5.1+ / 5.4+ / 5.6 desteklemez.
+        var supportsMinimal = string.IsNullOrEmpty(model)
+            || model.StartsWith("gpt-5-", StringComparison.OrdinalIgnoreCase)
+            || model.Equals("gpt-5", StringComparison.OrdinalIgnoreCase);
+        if (supportsMinimal) return "minimal";
+        return hasTools ? "none" : "low";
+    }
+
+    /// <summary>
     /// Etkin sistem promptunu oluşturur. <see cref="AiCompletionRequest.ResponseJsonSchema"/> doluysa,
     /// sağlayıcıdan bağımsız olarak "yalnızca bu şemaya uygun JSON döndür" talimatını ekler — adapter
     /// ayrıca sağlayıcının JSON modunu da açar. Şema yoksa sistem promptu olduğu gibi döner.
