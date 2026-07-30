@@ -42,7 +42,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         if (!IsConfigured)
             throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
-        var model = _options.OpenAI.Model;
+        // Politika modeli (varsa) tek-atış yolunda da geçerli — ör. derin araştırma sentezi
+        // gpt-5.6-terra ister, hızlı triyaj global gpt-5-mini'de kalır.
+        var model = request.Model ?? _options.OpenAI.Model;
         var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);
 
         var messages = new List<object>();
