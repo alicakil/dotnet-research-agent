@@ -49,12 +49,35 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     public static bool IsLowYieldHost(string url) =>
         TryGetHost(url, out var host) && LowYieldHosts.Any(b => host == b || host.EndsWith("." + b));
 
+    /// <summary>
+    /// Kullanıcının yazdığı adresi çekilebilir bir URL'ye çevirir. Form alanına şema YAZILMAZ —
+    /// insanlar "sitem.com" yazar, "https://sitem.com" değil. Prod'da bu yüzden bir adayın kendi
+    /// sitesi (en değerli, kimliği sabit kanıt kaynağı) sessizce "invalid_url" ile atlanmıştı.
+    /// Şema varsa dokunulmaz; yoksa https varsayılır (http gerekiyorsa yönlendirme takip ediliyor).
+    ///
+    /// NOKTA ŞARTI kasıtlı: şemayı her girdiye eklemek "not-a-url" gibi çöpü de geçerli bir
+    /// mutlak URI yapar, sonra DNS çözülemeyince <c>private_address_blocked</c> ile reddedilir —
+    /// yani çöp girdi, SSRF girişimiyle AYNI sebep koduna düşer ve o kod anlamını yitirir.
+    /// Noktasız bir host adı zaten hiçbir zaman kamuya açık bir site değildir.
+    /// </summary>
+    public static string NormalizeUrl(string url)
+    {
+        var trimmed = (url ?? string.Empty).Trim();
+        if (trimmed.Length == 0) return trimmed;
+        if (trimmed.Contains("://", StringComparison.Ordinal)) return trimmed;
+
+        var hostPart = trimmed.Split('/', '?', '#')[0];
+        return hostPart.Contains('.', StringComparison.Ordinal) ? "https://" + trimmed : trimmed;
+    }
+
     public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(url))
             return new FetchedPage(url, false, null, "empty_url");
 
-        if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri)
+        url = NormalizeUrl(url);
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             return new FetchedPage(url, false, null, "invalid_url");
 
@@ -237,7 +260,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private static bool TryGetHost(string url, out string host)
     {
         host = string.Empty;
-        if (!Uri.TryCreate(url?.Trim() ?? "", UriKind.Absolute, out var uri)) return false;
+        // TryGetHost false döner ve IsBlockedHost onu "bloklu değil" sayar — blok listesinde delik.
+        if (!Uri.TryCreate(NormalizeUrl(url ?? string.Empty), UriKind.Absolute, out var uri)) return false;
         host = uri.Host.ToLowerInvariant();
         if (host.StartsWith("www.")) host = host[4..];
         return true;

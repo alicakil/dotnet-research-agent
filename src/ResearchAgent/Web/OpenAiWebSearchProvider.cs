@@ -21,10 +21,11 @@ namespace WebApi.Services.Ai;
 /// <c>AiTrace</c>'e satır DÜŞMEZ. Maliyet OpenAI Costs API'sinde (admin panelinde) görünür; buradaki
 /// token kullanımı ayrıca log'a yazılır ki CloudWatch'tan izlenebilsin.
 /// </summary>
-public sealed class OpenAiWebSearchProvider : IWebSearchProvider
+public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
 {
     private const string Endpoint = "https://api.openai.com/v1/responses";
     private const int MaxSnippetChars = 400;
+    private const int MaxNarrativeChars = 4_000;
 
     private readonly HttpClient _httpClient;
     private readonly AiOptions _options;
@@ -41,12 +42,18 @@ public sealed class OpenAiWebSearchProvider : IWebSearchProvider
         _options = options.Value;
         _logger = logger;
         _apiKey = configuration["Ai:OpenAI:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        // Arama + sayfa okuma modelin tarafında olduğu için tek çağrı uzun sürebilir.
-        _httpClient.Timeout = TimeSpan.FromSeconds(40);
+        // Arama + sayfa okuma + muhakeme modelin tarafında olduğu için tek çağrı UZUN sürer.
+        // 31 Tem 2026 ölçümü (gerçek profiller): 45 sn · 52 sn · 62 sn · 68 sn · 95 sn.
+        // Eski 40 sn'lik değer üst sınırın ALTINDAYDI — eskalasyon çağrısı düzenli olarak
+        // TaskCanceledException ile düşer, kanıt toplanmaz ve sebebi "timeout" diye görünürdü.
+        // 180 sn üst kuyruğa da yer bırakıyor; Lambda'nın 600 sn'si bunu rahat kapsıyor.
+        _httpClient.Timeout = TimeSpan.FromSeconds(180);
     }
 
-    /// <summary>Anahtar var AMA özellik bayrağı da açık olmalı — bkz.
-    /// <see cref="AiOptions.EnableOpenAiWebSearch"/> (varsayılan kapalı: 36 sn gecikme + kimlik-dışı sonuçlar).</summary>
+    /// <summary>
+    /// Anahtar var AMA <see cref="AiOptions.EnableOpenAiWebSearch"/> kill-switch'i de açık olmalı.
+    /// Kapalıyken eskalasyon hiç denenmez ve araştırma hızlı kademenin bulduğuyla yetinir.
+    /// </summary>
     public bool IsConfigured => _options.EnableOpenAiWebSearch && !string.IsNullOrWhiteSpace(_apiKey);
 
     public async Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default)
@@ -87,7 +94,12 @@ public sealed class OpenAiWebSearchProvider : IWebSearchProvider
 
             var results = ParseCitations(payload, maxResults);
             LogUsage(payload, query, results.Count);
-            return WebSearchOutcome.Ok(results);
+
+            // Modelin DÜZYAZISI da taşınıyor, yalnız linkler değil. Ölçtük: bu sağlayıcının asıl
+            // olarak gösteren hiçbir kaynak yok" ya da "bu kaynak farklı bir tam ad kullanıyor"
+            // gibi NEGATİF ve AYIRT EDİCİ bulgular yalnız burada var. Yalnız atıfları alsaydık
+            // 45–95 sn'lik çağrının en iyi kısmını çöpe atmış olurduk.
+            return WebSearchOutcome.Ok(results, ExtractNarrative(payload));
         }
         catch (Exception ex)
         {
@@ -140,6 +152,40 @@ public sealed class OpenAiWebSearchProvider : IWebSearchProvider
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Modelin serbest metnini (tüm <c>output[].content[].text</c> parçalarını) birleştirir.
+    /// Sentez adımına "arama motorunun kendi raporu" olarak verilir — kimlik ayrımı burada.
+    /// </summary>
+    private static string? ExtractNarrative(string payload)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payload);
+            if (!doc.RootElement.TryGetProperty("output", out var output) || output.ValueKind != JsonValueKind.Array)
+                return null;
+
+            var parts = new List<string>();
+            foreach (var item in output.EnumerateArray())
+            {
+                if (!item.TryGetProperty("content", out var contents) || contents.ValueKind != JsonValueKind.Array)
+                    continue;
+                foreach (var content in contents.EnumerateArray())
+                {
+                    if (content.TryGetProperty("text", out var t) && t.ValueKind == JsonValueKind.String)
+                    {
+                        var s = t.GetString();
+                        if (!string.IsNullOrWhiteSpace(s)) parts.Add(s);
+                    }
+                }
+            }
+
+            if (parts.Count == 0) return null;
+            var joined = string.Join("\n", parts).Trim();
+            return joined.Length > MaxNarrativeChars ? joined[..MaxNarrativeChars] : joined;
+        }
+        catch { return null; }   // metin bonus; okunamaması atıfları geçersiz kılmaz
     }
 
     private static string ExtractSnippet(string text, JsonElement annotation)

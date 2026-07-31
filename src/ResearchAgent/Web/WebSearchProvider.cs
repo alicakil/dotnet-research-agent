@@ -11,10 +11,15 @@ public sealed record WebSearchResult(string Title, string Snippet, string Url);
 /// "arama çalışmadı" TAMAMEN farklı iki durum: ilki normal (zayıf dijital iz — ölçtük,
 /// SESSİZ KALMAMALI — yoksa ücretli katman bir gün ölür ve kimse fark etmez.
 /// </summary>
-public sealed record WebSearchOutcome(IReadOnlyList<WebSearchResult> Results, bool Failed, string? Error)
+public sealed record WebSearchOutcome(
+    IReadOnlyList<WebSearchResult> Results,
+    bool Failed,
+    string? Error,
+    string? Summary = null)
 {
     public static readonly WebSearchOutcome Empty = new(Array.Empty<WebSearchResult>(), false, null);
-    public static WebSearchOutcome Ok(IReadOnlyList<WebSearchResult> results) => new(results, false, null);
+    public static WebSearchOutcome Ok(IReadOnlyList<WebSearchResult> results, string? summary = null) =>
+        new(results, false, null, summary);
     public static WebSearchOutcome Fail(string error) => new(Array.Empty<WebSearchResult>(), true, error);
 }
 
@@ -29,6 +34,14 @@ public interface IWebSearchProvider
     bool IsConfigured { get; }
     Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default);
 }
+
+/// <summary>
+/// ESKALASYON arama sağlayıcısı — hızlı SERP kademesinden AYRI bir seam. Kasten ayrı bir tip:
+/// bu sağlayıcı pahalı ve yavaştır (ölçüm: 45–95 sn/sorgu), o yüzden zincire halka olarak
+/// KONULMAZ; yalnız hızlı kademe yetersiz kaldığında tek seferlik çağrılır. Ayrı arayüz olması
+/// DI'da yanlışlıkla <see cref="IWebSearchProvider"/> yerine geçmesini de engeller.
+/// </summary>
+public interface IEscalationSearchProvider : IWebSearchProvider;
 
 /// <summary>
 /// Serper.dev (Google SERP proxy) — ~$1/1000 sorgu. Anahtar: <c>Ai:Serper:ApiKey</c>
