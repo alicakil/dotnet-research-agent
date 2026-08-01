@@ -22,6 +22,17 @@ public sealed class AiCompletionRequest
     public required string UserPrompt { get; init; }
 
     /// <summary>
+    /// Görsel girdiler (data URI: <c>data:image/jpeg;base64,…</c>). Dolu olduğunda istek yalnızca
+    /// GÖRÜNTÜ OKUYABİLEN bir sağlayıcıya gidebilir — bugün OpenAI. Diğer adapter'lar
+    /// <see cref="IAiProviderAdapter.SupportsImages"/> ile kendilerini eler; fallback zinciri onları
+    /// atlar, çünkü görselleri sessizce düşürüp metin göndermek "boş sayfa okumuş" bir cevap üretir
+    /// ve bu, hatanın fark edilmediği en kötü türü olurdu.
+    ///
+    /// bu yüzden ekranın kendisi kanıt kaynağı oluyor.
+    /// </summary>
+    public IReadOnlyList<string>? Images { get; init; }
+
+    /// <summary>
     /// Doluysa, sağlayıcıdan bu JSON şemasına uygun structured output istenir
     /// (örn. meal plan = recipe-id + porsiyon listesi). Boşsa serbest metin döner.
     /// Şemaya uyma garantisi sağlayıcıdan sağlayıcıya değişir; adapter en iyi çabayı gösterir,

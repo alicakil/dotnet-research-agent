@@ -20,6 +20,13 @@ public interface IAiProviderAdapter
     bool IsConfigured { get; }
 
     /// <summary>
+    /// Bu sağlayıcı <see cref="AiCompletionRequest.Images"/> okuyabiliyor mu. Varsayılan false:
+    /// görselli bir isteği görsel okuyamayan sağlayıcıya göndermek, görselleri sessizce düşürüp
+    /// "boş sayfa" cevabı üretmek demek olurdu — çağıran servisler bu bayrağa bakıp eler.
+    /// </summary>
+    bool SupportsImages => false;
+
+    /// <summary>
     /// İsteği bu sağlayıcıyla tamamlar. Hata, kota aşımı veya rate-limit durumunda exception
     /// fırlatır; router bunu yakalayıp bir sonraki sağlayıcıya geçer.
     /// </summary>

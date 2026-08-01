@@ -37,6 +37,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
 
+    /// <summary>gpt-5 ailesi çok-modlu: görseller mesaj içeriğine `image_url` parçası olarak eklenir.</summary>
+    public bool SupportsImages => true;
+
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
@@ -50,7 +53,23 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         var messages = new List<object>();
         if (!string.IsNullOrWhiteSpace(systemText))
             messages.Add(new { role = "system", content = systemText });
-        messages.Add(new { role = "user", content = request.UserPrompt });
+
+        if (request.Images is { Count: > 0 })
+        {
+            // Çok-modlu istekte user content bir DİZİ olur: önce metin, sonra görseller.
+            // düşük çözünürlükte okunmuyor; bu iş zaten görüntü başına birkaç sent.
+            var parts = new List<object> { new { type = "text", text = request.UserPrompt } };
+            parts.AddRange(request.Images.Select(image => (object)new
+            {
+                type = "image_url",
+                image_url = new { url = image, detail = "high" }
+            }));
+            messages.Add(new { role = "user", content = parts });
+        }
+        else
+        {
+            messages.Add(new { role = "user", content = request.UserPrompt });
+        }
 
         var body = new Dictionary<string, object?>
         {
