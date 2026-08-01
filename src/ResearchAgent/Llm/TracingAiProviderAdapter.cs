@@ -31,6 +31,12 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
     public AiProvider Provider => _inner.Provider;
     public bool IsConfigured => _inner.IsConfigured;
 
+    // Every capability flag has to be forwarded, not inherited: this decorator wraps every adapter,
+    // so an un-forwarded member silently reports the interface DEFAULT for the whole fleet. That is
+    // what happened with images — callers filter on SupportsImages, the decorator answered false for
+    // OpenAI too, and screenshot capture failed instantly with "no capable provider".
+    public bool SupportsImages => _inner.SupportsImages;
+
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
