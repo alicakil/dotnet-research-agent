@@ -77,7 +77,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             ["messages"] = messages,
             // Reasoning'i kıs → hızlı (25s timeout + prod 30s API-GW altında) + ucuz; grounded iş
             // reasoning gerektirmez. Değer MODELE GÖRE: `minimal` yeni kuşakta 400 veriyor (bkz. helper).
-            ["reasoning_effort"] = AiAdapterHelpers.ResolveReasoningEffort(model),
+            ["reasoning_effort"] = request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(model),
         };
         if (request.MaxOutputTokens is int maxTokens)
             body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL

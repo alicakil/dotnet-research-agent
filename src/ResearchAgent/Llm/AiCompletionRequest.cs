@@ -40,6 +40,12 @@ public sealed class AiCompletionRequest
     /// </summary>
     public string? ResponseJsonSchema { get; init; }
 
+    /// <summary>
+    /// Akıl yürütme seviyesi override'ı — politika belirler, adapter uygular. Null = model
+    /// varsayılanı. Yalnız OpenAI adapter'ı dikkate alır.
+    /// </summary>
+    public string? ReasoningEffort { get; init; }
+
     /// <summary>Maksimum çıktı token'ı (maliyet tavanı). Null = sağlayıcı/politika varsayılanı.</summary>
     public int? MaxOutputTokens { get; init; }
 
