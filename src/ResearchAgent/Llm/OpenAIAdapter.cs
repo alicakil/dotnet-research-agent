@@ -112,6 +112,18 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             text = contentEl.GetString() ?? string.Empty;
         }
 
+        // Akıl yürütme token'ları `max_completion_tokens` tavanından harcanır. Efor yükseltilip
+        // tavan yükseltilmezse model düşünmeye tüm bütçeyi yer ve içerik BOŞ döner — HTTP 200,
+        // finish_reason "length", çağıran taraf ise "çıktı okunamadı" der ve sebep görünmez.
+        var finishReason = choices[0].TryGetProperty("finish_reason", out var fr) ? fr.GetString() : null;
+        if (string.IsNullOrEmpty(text) && finishReason == "length")
+        {
+            throw new HttpRequestException(
+                $"OpenAI çıktı token tavanına takıldı ve içerik üretemedi (model={model}, " +
+                $"tavan={request.MaxOutputTokens}, efor={request.ReasoningEffort ?? "varsayılan"}). " +
+                "Akıl yürütme bütçeyi tüketmiş olabilir — MaxOutputTokens'ı yükseltin ya da eforu düşürün.");
+        }
+
         int inputTokens = 0, outputTokens = 0;
         if (root.TryGetProperty("usage", out var usage))
         {
