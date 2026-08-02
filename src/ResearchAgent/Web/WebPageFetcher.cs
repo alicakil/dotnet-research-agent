@@ -100,8 +100,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
             var current = uri;
             for (var hop = 0; hop <= MaxRedirects; hop++)
             {
-                if (!await IsPubliclyRoutableAsync(current, cts.Token))
-                    return new FetchedPage(url, false, null, "private_address_blocked");
+                if (await ResolveBlockReasonAsync(current, cts.Token) is { } blockReason)
+                    return new FetchedPage(url, false, null, blockReason);
 
                 using var request = new HttpRequestMessage(HttpMethod.Get, current);
                 // Bazı siteler UA'sız isteklere 403 veriyor; kimliğimizi dürüstçe belirtiyoruz.
@@ -170,21 +170,33 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     /// <summary>
     /// SSRF koruması: host'un çözümlendiği TÜM adresler public olmalı. Lambda VPC içinde
     /// çalışıyor — 10.x, 169.254.x (IMDS), 127.x, ::1 gibi hedefler kesinlikle dışarı kapalı.
+    ///
+    /// Dönen sebep kodu AYRIŞTIRILMIŞTIR. İkisi de "çekmedik" ile biter ama anlamları taban tabana
+    /// zıttır: <c>private_address_blocked</c> güvenlik kararıdır, <c>host_not_found</c> ise adresin
+    /// hiç var olmadığını söyler. Tek kod altında toplanınca operatöre yanlış bilgi gidiyordu —
+    /// raporlandı, ki bu düzeltilebilir bir arıza izlenimi verir. Sebep koduna güvenip
+    /// araştıracağımız için doğru olması gerekiyor.
     /// </summary>
-    private static async Task<bool> IsPubliclyRoutableAsync(Uri uri, CancellationToken ct)
+    private static async Task<string?> ResolveBlockReasonAsync(Uri uri, CancellationToken ct)
     {
+        IPAddress[] addresses;
         try
         {
-            var addresses = IPAddress.TryParse(uri.Host, out var literal)
-                ? new[] { literal }
+            addresses = IPAddress.TryParse(uri.Host, out var literal)
+                ? [literal]
                 : await Dns.GetHostAddressesAsync(uri.Host, ct);
-
-            return addresses.Length > 0 && addresses.All(IsPublic);
+        }
+        catch (SocketException)
+        {
+            return "host_not_found";     // NXDOMAIN — böyle bir alan adı yok
         }
         catch
         {
-            return false;   // çözümlenemeyen host = denenmez
+            return "dns_error";          // çözümleme başarısız (timeout, geçici arıza)
         }
+
+        if (addresses.Length == 0) return "host_not_found";
+        return addresses.All(IsPublic) ? null : "private_address_blocked";
     }
 
     private static bool IsPublic(IPAddress ip)
