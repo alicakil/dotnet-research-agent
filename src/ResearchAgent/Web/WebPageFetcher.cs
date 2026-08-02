@@ -1,11 +1,19 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace WebApi.Services.Ai;
 
-/// <summary>Tek bir sayfa çekme sonucu. <see cref="Text"/> doluysa kullanılabilir içerik var.</summary>
-public sealed record FetchedPage(string Url, bool Success, string? Text, string? SkipReason);
+/// <summary>
+/// Tek bir sayfa çekme sonucu. <see cref="Text"/> doluysa kullanılabilir içerik var.
+///
+/// <see cref="Structured"/> sayfanın JSON-LD'sinden süzülen mesleki profil özeti (varsa). Düz
+/// metinden AYRI tutuluyor çünkü kalitesi bambaşka: puan, yorum sayısı ve yorum metinleri orada
+/// etiketli duruyor — 29 bin karakterlik menü/footer gürültüsünün içinden çıkarılmasına gerek
+/// dolu; sıradan sitelerde boş ve bu normaldir.
+/// </summary>
+public sealed record FetchedPage(string Url, bool Success, string? Text, string? SkipReason, string? Structured = null);
 
 /// <summary>Sayfa çekme seam'i — derin araştırma servisi buna bağlanır, testler stub verir (ağ yok).</summary>
 public interface IWebPageFetcher
@@ -123,10 +131,13 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                 var html = await ReadCappedAsync(response, cts.Token);
                 var text = HtmlToText(html);
                 if (text.Length > MaxTextChars) text = text[..MaxTextChars];
+                var structured = ExtractStructuredProfile(html);
 
-                return text.Length < 80
+                // Yapılandırılmış veri VARSA düz metin kısa kalsa bile sayfa işe yarar: dizin
+                // profillerinin değerli kısmı zaten JSON-LD'de duruyor.
+                return text.Length < 80 && structured is null
                     ? new FetchedPage(current.ToString(), false, null, "too_little_text")
-                    : new FetchedPage(current.ToString(), true, text, null);
+                    : new FetchedPage(current.ToString(), true, text, null, structured);
             }
 
             return new FetchedPage(url, false, null, "too_many_redirects");
@@ -247,6 +258,148 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return metaParts.Count > 0
             ? string.Join(" · ", metaParts.Distinct()) + "\n\n" + body
             : body;
+    }
+
+    // ── JSON-LD → mesleki profil özeti ────────────────────────────────────────
+
+    private static readonly Regex JsonLdRegex =
+        new(@"<script[^>]+type\s*=\s*[""']application/ld\+json[""'][^>]*>(.*?)</script>",
+            RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+    /// <summary>Kişi/işletme anlamına gelen schema.org tipleri — dizinlerde profil bunlardan biridir.</summary>
+    private static readonly HashSet<string> ProfileTypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Physician", "Person", "MedicalBusiness", "MedicalClinic", "LocalBusiness",
+        "Dentist", "HealthAndBeautyBusiness", "ProfessionalService",
+    };
+
+    private const int MaxStructuredChars = 1_800;
+    private const int MaxReviews = 3;
+
+    /// <summary>
+    /// Sayfanın JSON-LD bloklarından mesleki profil alanlarını süzer.
+    ///
+    /// Neden beyaz liste: JSON-LD'nin tamamı yüz binlerce karakter olabiliyor (navigasyon, breadcrumb,
+    /// site şeması) ve ham hâlde modele vermek hem pahalı hem gürültülü. Buradaki alanlar, uygunluk
+    /// puanını gerçekten hareket ettiren şeyler: kendi muayenehanesi var mı, randevu/fiyat açık mı,
+    /// kaç yorum almış — yani "kendi danışan akışına sahip mi" sorusunun cevabı.
+    ///
+    /// TAM TOLERANSLI: bozuk/kesik JSON sessizce atlanır (indirme tavanı bir bloğu ortadan kesmiş
+    /// olabilir). Hiçbir şey bulunamazsa null döner ve çağıran düz metinle devam eder.
+    /// </summary>
+    public static string? ExtractStructuredProfile(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return null;
+
+        var lines = new List<string>();
+        foreach (Match block in JsonLdRegex.Matches(html))
+        {
+            if (lines.Count > 0 && string.Join('\n', lines).Length >= MaxStructuredChars) break;
+            try
+            {
+                using var doc = JsonDocument.Parse(WebUtility.HtmlDecode(block.Groups[1].Value).Trim());
+                CollectProfiles(doc.RootElement, lines, 0);
+            }
+            catch { /* bozuk veya kesik blok — atla */ }
+        }
+
+        if (lines.Count == 0) return null;
+        var joined = string.Join('\n', lines.Distinct());
+        return joined.Length > MaxStructuredChars ? joined[..MaxStructuredChars] : joined;
+    }
+
+    /// <summary>JSON-LD ağacında gezer: dizi, @graph ve iç içe düğümler hepsi olabiliyor.</summary>
+    private static void CollectProfiles(JsonElement node, List<string> lines, int depth)
+    {
+        if (depth > 4 || lines.Count > 40) return;
+
+        if (node.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in node.EnumerateArray()) CollectProfiles(item, lines, depth + 1);
+            return;
+        }
+
+        if (node.ValueKind != JsonValueKind.Object) return;
+
+        if (node.TryGetProperty("@graph", out var graph)) CollectProfiles(graph, lines, depth + 1);
+
+        var type = node.TryGetProperty("@type", out var t) && t.ValueKind == JsonValueKind.String
+            ? t.GetString()
+            : null;
+
+        if (type is not null && ProfileTypes.Contains(type))
+            Emit(node, type, lines);
+    }
+
+    private static void Emit(JsonElement node, string type, List<string> lines)
+    {
+        var name = Text(node, "name");
+        if (string.IsNullOrWhiteSpace(name)) return;
+
+        lines.Add($"[{type}] {name}");
+        foreach (var field in new[] { "jobTitle", "description", "telephone", "email", "url", "priceRange", "medicalSpecialty" })
+        {
+            var v = Text(node, field);
+            if (!string.IsNullOrWhiteSpace(v)) lines.Add($"  {field}: {Cap(v!, 300)}");
+        }
+
+        if (node.TryGetProperty("address", out var addr))
+        {
+            var parts = new[] { "streetAddress", "addressLocality", "addressRegion", "postalCode" }
+                .Select(k => Text(addr.ValueKind == JsonValueKind.Array && addr.GetArrayLength() > 0 ? addr[0] : addr, k))
+                .Where(v => !string.IsNullOrWhiteSpace(v));
+            var joined = string.Join(", ", parts);
+            if (joined.Length > 0)
+            {
+                // Birden çok adres = birden çok çalışma yeri; uygunluk açısından anlamlı bir sinyal.
+                var count = addr.ValueKind == JsonValueKind.Array ? addr.GetArrayLength() : 1;
+                lines.Add($"  address: {Cap(joined, 200)}{(count > 1 ? $" (+{count - 1} adres daha)" : "")}");
+            }
+        }
+
+        if (node.TryGetProperty("aggregateRating", out var rating) && rating.ValueKind == JsonValueKind.Object)
+        {
+            var value = Text(rating, "ratingValue");
+            var count = Text(rating, "reviewCount") ?? Text(rating, "ratingCount");
+            if (value is not null) lines.Add($"  rating: {value}{(count is not null ? $" ({count} yorum)" : "")}");
+        }
+
+        if (node.TryGetProperty("review", out var reviews))
+        {
+            var items = reviews.ValueKind == JsonValueKind.Array
+                ? reviews.EnumerateArray().Take(MaxReviews)
+                : new[] { reviews }.AsEnumerable();
+            foreach (var r in items)
+            {
+                var body = Text(r, "reviewBody");
+                if (string.IsNullOrWhiteSpace(body)) continue;
+                var date = Text(r, "datePublished");
+                lines.Add($"  review{(date is not null ? $" ({date[..Math.Min(10, date.Length)]})" : "")}: {Cap(body!, 220)}");
+            }
+        }
+    }
+
+    /// <summary>Alanı metin olarak okur; schema.org'da aynı alan string, sayı veya {name:...} olabiliyor.</summary>
+    private static string? Text(JsonElement node, string property)
+    {
+        if (node.ValueKind != JsonValueKind.Object || !node.TryGetProperty(property, out var v)) return null;
+        return v.ValueKind switch
+        {
+            JsonValueKind.String => v.GetString(),
+            JsonValueKind.Number => v.ToString(),
+            JsonValueKind.Object => Text(v, "name"),
+            JsonValueKind.Array when v.GetArrayLength() > 0 =>
+                string.Join(", ", v.EnumerateArray().Take(4)
+                    .Select(x => x.ValueKind == JsonValueKind.String ? x.GetString() : Text(x, "name"))
+                    .Where(s => !string.IsNullOrWhiteSpace(s))),
+            _ => null,
+        };
+    }
+
+    private static string Cap(string s, int max)
+    {
+        var clean = Normalize(WebUtility.HtmlDecode(s)).Replace('\n', ' ');
+        return clean.Length > max ? clean[..max] + "…" : clean;
     }
 
     /// <summary>NBSP ve akraba Unicode boşlukları normal boşluğa çevirip sıkıştırır — modele
