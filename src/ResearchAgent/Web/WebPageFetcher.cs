@@ -54,6 +54,19 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     public static bool IsBlockedHost(string url) =>
         TryGetHost(url, out var host) && BlockedHosts.Any(b => host == b || host.EndsWith("." + b));
 
+    /// <summary>
+    /// Giriş duvarına yönlendiren yollar. Bunlar 200 döner ve gövdeleri 80 karakterden uzundur,
+    /// yani kontrol edilmezse BAŞARILI bir çekim gibi görünür — kanıt yığınına bir oturum açma
+    /// <c>/accounts/login/?next=…</c> adresine düştü ve o sayfa kanıt sayıldı. Model neyse ki
+    /// "içerik görülemedi" dedi, ama buna güvenmek zorunda kalmamalıyız: okunamayan bir kaynağı
+    /// okunmuş gibi sunmak, kanıt disiplinini temelden bozar.
+    /// </summary>
+    private static readonly string[] LoginPaths =
+        ["/accounts/login", "/login", "/signin", "/sign-in", "/auth/login", "/users/sign_in"];
+
+    private static bool IsLoginWall(Uri uri) =>
+        LoginPaths.Any(p => uri.AbsolutePath.StartsWith(p, StringComparison.OrdinalIgnoreCase));
+
     public static bool IsLowYieldHost(string url) =>
         TryGetHost(url, out var host) && LowYieldHosts.Any(b => host == b || host.EndsWith("." + b));
 
@@ -89,6 +102,11 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             return new FetchedPage(url, false, null, "invalid_url");
 
+        // Giriş sayfası hem başlangıçta verilebilir hem de yönlendirmeyle karşımıza çıkabilir;
+        // ikisinde de içerik yok, sadece oturum açma formu var.
+        if (IsLoginWall(uri))
+            return new FetchedPage(url, false, null, "login_wall");
+
         if (IsBlockedHost(url))
             return new FetchedPage(url, false, null, "blocked_host");
 
@@ -118,6 +136,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                     current = location.IsAbsoluteUri ? location : new Uri(current, location);
                     if (IsBlockedHost(current.ToString()))
                         return new FetchedPage(url, false, null, "blocked_host_after_redirect");
+                    if (IsLoginWall(current))
+                        return new FetchedPage(url, false, null, "login_wall");
                     continue;
                 }
 
