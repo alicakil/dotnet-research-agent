@@ -47,6 +47,17 @@ public sealed class AiChatRequest
     public int? MaxOutputTokens { get; init; }
     /// <summary>OpenAI model override (policy'den; null → adapter varsayılanı).</summary>
     public string? Model { get; init; }
+
+    /// <summary>
+    /// reasoning_effort override (policy'den; null → modele göre varsayılan, bkz.
+    /// <see cref="AiAdapterHelpers.ResolveReasoningEffort"/>).
+    ///
+    /// v6.8'e kadar bunu YALNIZCA tek-atışlık <c>CompleteAsync</c> okuyordu; sohbet yüzeyleri
+    /// (public / support / admin chat) policy'de ne yazarsa yazsın sessizce modelin varsayılanına
+    /// düşüyordu. gpt-5-mini için o varsayılan "minimal" — yani satış asistanımız fiilen akıl
+    /// yürütmeden konuşuyordu ve zor sorularda düşünme bütçesini yiyip BOŞ cevap dönüyordu.
+    /// </summary>
+    public string? ReasoningEffort { get; init; }
 }
 
 /// <summary>Tool-calling sonucu: ya final <see cref="Text"/>, ya da <see cref="ToolCalls"/> (araç talebi).</summary>

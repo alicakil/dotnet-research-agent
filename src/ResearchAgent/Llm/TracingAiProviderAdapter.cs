@@ -107,6 +107,8 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
         ContextKey = _context.ContextKey,
         ConversationId = _context.ConversationId,
         Surface = _context.Surface,
+        DeviceId = _context.DeviceId,
+        SessionId = _context.SessionId,
         TaskType = taskType.ToString(),
         Provider = _inner.Provider.ToString(),   // fallback denemesi başarısız olsa bile hangi sağlayıcı
         SystemPrompt = systemPrompt,

@@ -152,8 +152,12 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         {
             ["model"] = model,
             ["messages"] = AiAdapterHelpers.BuildChatMessages(request.Messages),
-            // Araç varlığı değeri etkiler — yeni kuşak, tool'larla reasoning kabul etmiyor (bkz. helper).
-            ["reasoning_effort"] = AiAdapterHelpers.ResolveReasoningEffort(model, hasTools),
+            // Policy override öncelikli (v6.8: public chat "medium" ister); yoksa modele göre
+            // varsayılan. Araç varlığı değeri etkiler — yeni kuşak, tool'larla reasoning kabul
+            // etmiyor (bkz. helper), o yüzden tool varken override yok sayılır.
+            ["reasoning_effort"] = hasTools
+                ? AiAdapterHelpers.ResolveReasoningEffort(model, hasTools: true)
+                : request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(model),
         };
         if (request.MaxOutputTokens is int maxTokens)
             body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL

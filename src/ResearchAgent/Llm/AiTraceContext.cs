@@ -18,6 +18,16 @@ public sealed class AiTraceContext
     public string? ConversationId { get; set; }
     public string? Surface { get; set; }
 
+    /// <summary>
+    /// ANONİM ziyaretçinin kalıcı cihaz kimliği (`vit_device_id`) — <c>SiteVisits</c>'in taşıdığının
+    /// AYNISI, dolayısıyla sohbet ile gezinme geçmişi JOIN'lenebilir. Giriş yapmış kullanıcıda gerek
+    /// yok (orada <see cref="TenantId"/>/<see cref="UserId"/> zaten var); bu, public yüzeyin kimliğidir.
+    /// </summary>
+    public string? DeviceId { get; set; }
+
+    /// <summary>Anonim ziyaretçinin o anki gezinme oturumu (`vit_site_session`).</summary>
+    public string? SessionId { get; set; }
+
     /// <summary>Aynı mantıksal işlemin (fallback denemeleri) satırlarını gruplayan kimlik.</summary>
     public Guid? CorrelationId { get; private set; }
 

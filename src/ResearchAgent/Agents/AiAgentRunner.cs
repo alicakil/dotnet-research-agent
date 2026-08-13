@@ -74,6 +74,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
                 Tools = tools.Count > 0 ? tools : null,
                 MaxOutputTokens = policy.MaxOutputTokens,
                 Model = policy.Model,
+                ReasoningEffort = policy.ReasoningEffort,
             };
 
             var result = await CallWithFallbackAsync(policy, req, cancellationToken);
