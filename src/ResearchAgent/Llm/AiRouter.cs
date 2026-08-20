@@ -52,21 +52,32 @@ public sealed class AiRouter : IAiCompletionService
         // 2. Kota guard — yetersizse AiQuotaExceededException (her tenant'ta zorunlu, test/demo dâhil).
         await _creditService.EnsureCanSpendAsync(tenantId, policy.CreditCost, cancellationToken);
 
-        // Politika max-token'ını isteğe uygula (istek belirtmemişse).
+        // Politikayı isteğe uygula (istek kendi değerini vermişse o kazanır).
+        // GÖRSELLER burada AYNEN taşınır: düşürülürlerse model boş bir sayfayı okumuş gibi cevap
+        // verir ve bu, fark edilmeyen türden bir hata olurdu (bkz. AiCompletionRequest.Images).
         var effectiveRequest = new AiCompletionRequest
         {
             TaskType = request.TaskType,
             SystemPrompt = request.SystemPrompt,
             UserPrompt = request.UserPrompt,
+            Images = request.Images,
             ResponseJsonSchema = request.ResponseJsonSchema,
             MaxOutputTokens = request.MaxOutputTokens ?? policy.MaxOutputTokens,
+            Model = request.Model ?? policy.Model,
+            ReasoningEffort = request.ReasoningEffort ?? policy.ReasoningEffort,
         };
+
+        // Görselli istek yalnız görsel OKUYABİLEN sağlayıcıya gidebilir; diğerleri zincirden elenir
+        var needsVision = request.Images is { Count: > 0 };
+        if (needsVision && !policy.Providers.Any(pv => _adapters.Any(a => a.Provider == pv && a.IsConfigured && a.SupportsImages)))
+            throw new AiCompletionFailedException(
+                "Görsel okuyabilen bir AI sağlayıcı yapılandırılmamış; görselli istek işlenemiyor.");
 
         // 3. Sağlayıcı sırası + fallback (politikadaki sıraya göre).
         Exception? lastError = null;
         foreach (var providerType in policy.Providers)
         {
-            var adapter = _adapters.FirstOrDefault(a => a.Provider == providerType && a.IsConfigured);
+            var adapter = _adapters.FirstOrDefault(a => a.Provider == providerType && a.IsConfigured && (!needsVision || a.SupportsImages));
             if (adapter is null)
             {
                 _logger.LogDebug("AI sağlayıcı {Provider} atlandı (kayıtlı değil veya API anahtarı yok).", providerType);
