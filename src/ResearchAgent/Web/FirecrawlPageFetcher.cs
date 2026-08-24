@@ -1,0 +1,178 @@
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+
+namespace WebApi.Services.Ai;
+
+/// <summary>
+/// JS RENDER EDEN çekme kolu. Doğrudan HTTP çekimiyle
+/// (<see cref="WebPageFetcher"/>) okunamayan sayfalar için ikinci kademe.
+///
+/// istemci tarafında render ediyor; düz HTTP çekimi boş bir kabuk görüyor.
+///
+/// ⚠️ Bu kol PAHALI ve KOTALI olduğu için ASLA ilk sırada çalışmaz — bkz.
+/// <see cref="CompositeWebPageFetcher"/>. Kotayı, düz çekimin zaten hallettiği sayfalara
+/// harcamak, gerçekten ihtiyaç duyulan sayfa için kota bırakmamak demek.
+///
+/// Anahtar yoksa <see cref="IsConfigured"/> false döner ve kol zincirden sessizce düşer;
+/// araştırma bugünkü davranışıyla devam eder.
+/// </summary>
+public sealed class FirecrawlPageFetcher : IWebPageFetcher
+{
+    private const string Endpoint = "https://api.firecrawl.dev/v1/scrape";
+    private const int MaxChars = 20_000;
+
+    private readonly HttpClient _http;
+    private readonly string? _apiKey;
+    private readonly ILogger<FirecrawlPageFetcher> _logger;
+
+    public FirecrawlPageFetcher(
+        HttpClient http, IConfiguration configuration, ILogger<FirecrawlPageFetcher> logger)
+    {
+        _http = http;
+        _logger = logger;
+        _apiKey = configuration["Ai:Firecrawl:ApiKey"]
+                  ?? Environment.GetEnvironmentVariable("FIRECRAWL_API_KEY");
+
+        _http.Timeout = TimeSpan.FromSeconds(45);
+    }
+
+    public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
+
+    public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
+    {
+        if (!IsConfigured)
+            return new FetchedPage(url, false, null, "firecrawl_not_configured");
+
+        // SSRF ve giriş duvarı kuralları BURADA DA geçerli. Render eden bir kol, engelli host
+        // onların şartlarına aykırı olurdu, ve zaten e-posta vermezdi.
+        if (WebPageFetcher.IsBlockedHost(url))
+            return new FetchedPage(url, false, null, "blocked_host");
+
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
+            request.Content = JsonContent.Create(new
+            {
+                url,
+                formats = new[] { "markdown" },
+                onlyMainContent = true,
+            });
+
+            using var response = await _http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+                return new FetchedPage(url, false, null, $"firecrawl_http_{(int)response.StatusCode}");
+
+            using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            if (!doc.RootElement.TryGetProperty("data", out var data))
+                return new FetchedPage(url, false, null, "firecrawl_no_data");
+
+            var text = data.TryGetProperty("markdown", out var md) && md.ValueKind == JsonValueKind.String
+                ? md.GetString()
+                : null;
+
+            if (string.IsNullOrWhiteSpace(text))
+                return new FetchedPage(url, false, null, "firecrawl_empty");
+
+            var final = data.TryGetProperty("metadata", out var meta)
+                        && meta.TryGetProperty("sourceURL", out var src)
+                        && src.ValueKind == JsonValueKind.String
+                ? src.GetString() ?? url
+                : url;
+
+            return new FetchedPage(final, true, Truncate(text!), null);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Firecrawl çekimi başarısız: {Url}", url);
+            return new FetchedPage(url, false, null, "firecrawl_failed");
+        }
+    }
+
+    private static string Truncate(string text) =>
+        text.Length <= MaxChars ? text : text[..MaxChars];
+}
+
+/// <summary>
+/// İki kademeli sayfa çekme: ÖNCE ucuz düz HTTP, gerekirse JS render eden kol.
+/// Aynı desen arama tarafında zaten kurulu (<see cref="CompositeWebSearchProvider"/>) —
+/// ucuzdan pahalıya, ilk başarılıda dur.
+///
+/// Eskalasyon KOŞULLU, çünkü render eden kol kotalı. Üç tetik:
+///  • düz çekim başarısızsa,
+///  • gövde şüpheli derecede kısaysa (400 karakterin altı),
+///  • gövde AYNI HOST'TA daha önce görülen bir gövdeyle BİREBİR AYNIYSA → SPA kabuğu.
+///
+/// düz çekimde **tam olarak aynı 2638 karakteri** döndürüyor — tek sayfalık uygulama her rotada
+/// aynı HTML iskeletini veriyor, içerik istemcide render ediliyor. Kabuk 2638 karakter olduğu
+/// için "kısa gövde" kuralı bunu YAKALAMIYORDU ve kol sessizce hiç devreye girmeyecekti.
+/// Aynı sayfada Firecrawl 7712 karakterle gerçek ekip listesini getirdi.
+///
+/// Tekrar tespiti istek kapsamında (scoped) tutuluyor: bir araştırma turu boyunca hatırlıyor,
+/// turlar arasında taşınmıyor.
+///
+/// Kalıcı engeller eskalasyona GİRMEZ: engelli host, giriş duvarı ve geçersiz adres, render
+/// edilse de aynı sonucu verir — o kotayı harcamak boşuna.
+/// </summary>
+public sealed class CompositeWebPageFetcher(
+    WebPageFetcher primary,
+    FirecrawlPageFetcher rendered,
+    ILogger<CompositeWebPageFetcher> logger) : IWebPageFetcher
+{
+    private const int ThinBodyThreshold = 400;
+
+    private static readonly string[] PermanentSkips =
+        ["blocked_host", "blocked_host_after_redirect", "login_wall", "invalid_url", "empty_url"];
+
+    /// <summary>host → o host'ta düz çekimden dönen gövdelerin parmak izleri.</summary>
+    private readonly Dictionary<string, HashSet<string>> _seenBodies = new(StringComparer.OrdinalIgnoreCase);
+
+    public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
+    {
+        var page = await primary.FetchAsync(url, ct);
+
+        if (!rendered.IsConfigured) return page;
+        if (page.SkipReason is { } reason && PermanentSkips.Contains(reason)) return page;
+
+        var length = page.Text?.Length ?? 0;
+        var thin = page.Success && length < ThinBodyThreshold;
+        var shell = page.Success && IsRepeatedBody(url, page.Text);
+
+        if (page.Success && !thin && !shell) return page;
+
+        logger.LogInformation(
+            "Düz çekim yetersiz ({Sebep}) — JS render eden kola geçiliyor: {Url}",
+            !page.Success ? page.SkipReason
+                : shell ? $"aynı host'ta birebir aynı gövde ({length} karakter) → SPA kabuğu"
+                : $"gövde {length} karakter",
+            url);
+
+        var viaRender = await rendered.FetchAsync(url, ct);
+
+        // Render de tutmazsa DÜZ ÇEKİMİN sonucu korunur: zayıf bir gövde, hiç gövdeden iyidir
+        // ve arıza sebebi ilk çekimin sebebidir — onu ikinci kolun mesajıyla değiştirmek
+        // teşhisi bozardı.
+        return viaRender.Success ? viaRender : page;
+    }
+
+    /// <summary>
+    /// Bu gövde, aynı host'ta daha önce görülenin AYNISI mı? Öyleyse sayfaya özel içerik yok
+    /// demektir — SPA iskeleti. İlk görülüşte false döner (kıyaslanacak bir şey yok) ve gövde
+    /// kaydedilir; asıl yakalama ikinci sayfada olur, ki bizim için o sayfa ekip sayfasıdır.
+    /// </summary>
+    private bool IsRepeatedBody(string url, string? text)
+    {
+        if (string.IsNullOrEmpty(text)) return false;
+
+        var host = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
+        if (!_seenBodies.TryGetValue(host, out var bodies))
+            _seenBodies[host] = bodies = new HashSet<string>(StringComparer.Ordinal);
+
+        // Uzunluk + baş/son parçası: tam metni sözlükte tutmak, sayfa başına on binlerce
+        // karakteri istek boyunca bellekte taşımak olurdu.
+        var head = text.Length <= 200 ? text : text[..200];
+        var tail = text.Length <= 200 ? string.Empty : text[^200..];
+        return !bodies.Add($"{text.Length}|{head}|{tail}");
+    }
+}
