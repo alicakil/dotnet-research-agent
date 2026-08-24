@@ -197,7 +197,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     /// raporlandı, ki bu düzeltilebilir bir arıza izlenimi verir. Sebep koduna güvenip
     /// araştıracağımız için doğru olması gerekiyor.
     /// </summary>
-    private static async Task<string?> ResolveBlockReasonAsync(Uri uri, CancellationToken ct)
+    public static async Task<string?> ResolveBlockReasonAsync(Uri uri, CancellationToken ct)
     {
         IPAddress[] addresses;
         try
