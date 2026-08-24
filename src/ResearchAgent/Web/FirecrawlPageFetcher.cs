@@ -122,8 +122,21 @@ public sealed class CompositeWebPageFetcher(
 {
     private const int ThinBodyThreshold = 400;
 
+    /// <summary>
+    /// Render etmenin DEĞİŞTİREMEYECEĞİ arızalar. 404/410 bu listede olmalı ve olmaması prod'da
+    /// ölçüldü (24 Ağu): yol tahmini <c>/equipo</c>'yu deniyor, site 404 dönüyor, düz çekim doğru
+    /// şekilde eliyor — ama composite "başarısız" görüp Firecrawl'a geçiyordu ve Firecrawl
+    /// "Página no encontrada" sayfasını sorunsuz render edip BAŞARILI dönüyordu. Var olmayan bir
+    /// sayfa böylece kanıt yığınına giriyordu.
+    ///
+    /// 403 bilerek DIŞARIDA: orası çoğu zaman bot engeli ve render eden kolun çözebileceği tek
+    /// HTTP arızası o.
+    /// </summary>
     private static readonly string[] PermanentSkips =
-        ["blocked_host", "blocked_host_after_redirect", "login_wall", "invalid_url", "empty_url"];
+    [
+        "blocked_host", "blocked_host_after_redirect", "login_wall", "invalid_url", "empty_url",
+        "http_404", "http_410", "http_400", "http_401"
+    ];
 
     /// <summary>host → o host'ta düz çekimden dönen gövdelerin parmak izleri.</summary>
     private readonly Dictionary<string, HashSet<string>> _seenBodies = new(StringComparer.OrdinalIgnoreCase);
