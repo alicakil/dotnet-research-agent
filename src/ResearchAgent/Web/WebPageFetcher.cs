@@ -35,7 +35,11 @@ public interface IWebPageFetcher
 /// </summary>
 public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher> logger) : IWebPageFetcher
 {
-    private const int MaxRedirects = 3;
+    // 5, çünkü zincir bazen bir TUR ile başlıyor: sunucu önce dil çerezini basıp aynı adrese
+    // yönlendiriyor (ASP.NET kültür çerezi), asıl alan adına ancak ondan sonra gidiyor
+    // (denticity.com → 302 / → 302 www.denticity.com.tr). 3 hop bu tür zincirlerde biterken
+    // yakalanıyordu. Çerezler tutuluyor (handler UseCookies) — yoksa tur sonsuza döner.
+    private const int MaxRedirects = 5;
     private const int MaxDownloadBytes = 1_500_000;
     private const int MaxTextChars = 8_000;
     private static readonly TimeSpan PerUrlTimeout = TimeSpan.FromSeconds(8);
@@ -110,12 +114,46 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         if (IsBlockedHost(url))
             return new FetchedPage(url, false, null, "blocked_host");
 
+        var page = await AttemptAsync(url, uri, ct);
+
+        // HTTPS'İ OLMAYAN SİTE. Küçük işletme sitelerinde sık: 443 sessizce yutuluyor (RST bile
+        // dönmüyor, bağlantı asılı kalıyor), 80 çalışıyor ve oradan gerçek adrese yönlendiriyor.
+        // Tarayıcı bunu görmez, çünkü https başarısız olunca kendisi http'ye düşer — biz düşmüyorduk.
+        //
+        // Ölçüldü (DENTICITY, 27 Ağu 2026): kayıtlı adres https://denticity.com. 443 zaman aşımına
+        // düşüyor, http://denticity.com ise 302 ile www.denticity.com.tr'ye gidiyor ve site orada.
+        //
+        // Yalnız TAŞIMA katmanı arızasında denenir: 404/403 gibi bir CEVAP geldiyse site https
+        // konuşuyor demektir, şemayı düşürmek yanlış olurdu.
+        if (!page.Success
+            && page.SkipReason is "timeout" or "fetch_error"
+            && uri.Scheme == Uri.UriSchemeHttps
+            && uri.IsDefaultPort)
+        {
+            var overHttp = new UriBuilder(uri) { Scheme = Uri.UriSchemeHttp, Port = -1 }.Uri;
+            var viaHttp = await AttemptAsync(url, overHttp, ct);
+            if (viaHttp.Success)
+            {
+                logger.LogInformation("HTTPS yanıt vermedi, http'ye düşüldü: {Url}", url);
+                return viaHttp;
+            }
+        }
+
+        return page;
+    }
+
+    /// <summary>
+    /// Tek bir şemayla çekme denemesi. Kendi zaman aşımı saatiyle çalışır: http'ye düşme
+    /// denemesinin, https'in tükettiği süreden arta kalanla değil, tam bütçeyle koşması gerekiyor.
+    /// </summary>
+    private async Task<FetchedPage> AttemptAsync(string url, Uri start, CancellationToken ct)
+    {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(PerUrlTimeout);
 
         try
         {
-            var current = uri;
+            var current = start;
             for (var hop = 0; hop <= MaxRedirects; hop++)
             {
                 if (await ResolveBlockReasonAsync(current, cts.Token) is { } blockReason)

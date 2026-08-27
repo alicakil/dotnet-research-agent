@@ -135,17 +135,44 @@ public sealed class CompositeWebPageFetcher(
     private static readonly string[] PermanentSkips =
     [
         "blocked_host", "blocked_host_after_redirect", "login_wall", "invalid_url", "empty_url",
-        "http_404", "http_410", "http_400", "http_401"
+        "http_404", "http_410", "http_400", "http_401",
+        // Alan adı yoksa (NXDOMAIN) ya da hedef özel ağdaysa render edecek bir sayfa da yok.
+        "host_not_found", "private_address_blocked"
     ];
 
     /// <summary>host → o host'ta düz çekimden dönen gövdelerin parmak izleri.</summary>
     private readonly Dictionary<string, HashSet<string>> _seenBodies = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Bu turda ULAŞILAMADIĞI kanıtlanmış host'lar. Ölü bir host'a her yol denemesi iki kez
+    /// para/zaman yakıyor (düz çekim zaman aşımı + render eden kol), ve araştırmanın 180 sn'lik
+    /// bütçesi bununla doluyor.
+    ///
+    /// Ölçüldü (DENTICITY, 27 Ağu 2026): denticity.com'a dört adres denendi, her biri ~38 sn
+    /// (8 sn zaman aşımı + ~30 sn Firecrawl) yaktı. 152 saniye sonra bütçe bitti ve SIRADAKİ ADIM —
+    /// elimizdeki ÇALIŞAN kanıtı da öldürdü.
+    ///
+    /// Host bir kez ölü işaretlenince o turdaki kalan adresleri anında elenir. Turlar arasında
+    /// taşınmaz (scoped): geçici bir arıza kliniği kalıcı olarak kör etmemeli.
+    /// </summary>
+    private readonly HashSet<string> _deadHosts = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Taşıma katmanı arızaları — sayfa yok değil, host'a ULAŞILAMIYOR.</summary>
+    private static readonly string[] UnreachableReasons = ["timeout", "fetch_error", "dns_error"];
+
     public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
     {
+        var host = HostOf(url);
+        if (_deadHosts.Contains(host))
+            return new FetchedPage(url, false, null, "host_unreachable");
+
         var page = await primary.FetchAsync(url, ct);
 
-        if (!rendered.IsConfigured) return page;
+        if (!rendered.IsConfigured)
+        {
+            if (IsUnreachable(page)) MarkDead(host, url);
+            return page;
+        }
         if (page.SkipReason is { } reason && PermanentSkips.Contains(reason)) return page;
 
         var length = page.Text?.Length ?? 0;
@@ -163,11 +190,27 @@ public sealed class CompositeWebPageFetcher(
 
         var viaRender = await rendered.FetchAsync(url, ct);
 
+        // İki kol da ulaşamadıysa host ölü sayılır: aynı sitenin diğer adreslerini denemek
+        // bütçeyi yakmaktan başka bir şey yapmıyor.
+        if (!viaRender.Success && IsUnreachable(page)) MarkDead(host, url);
+
         // Render de tutmazsa DÜZ ÇEKİMİN sonucu korunur: zayıf bir gövde, hiç gövdeden iyidir
         // ve arıza sebebi ilk çekimin sebebidir — onu ikinci kolun mesajıyla değiştirmek
         // teşhisi bozardı.
         return viaRender.Success ? viaRender : page;
     }
+
+    private static bool IsUnreachable(FetchedPage page) =>
+        !page.Success && page.SkipReason is { } r && UnreachableReasons.Contains(r);
+
+    private void MarkDead(string host, string url)
+    {
+        if (host.Length == 0 || !_deadHosts.Add(host)) return;
+        logger.LogInformation("Host ulaşılamıyor, bu turda kalan adresleri elenecek: {Host} ({Url})", host, url);
+    }
+
+    private static string HostOf(string url) =>
+        Uri.TryCreate(WebPageFetcher.NormalizeUrl(url), UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
 
     /// <summary>
     /// Bu gövde, aynı host'ta daha önce görülenin AYNISI mı? Öyleyse sayfaya özel içerik yok
