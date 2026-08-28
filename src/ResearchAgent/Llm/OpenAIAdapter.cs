@@ -14,6 +14,8 @@ namespace WebApi.Services.Ai;
 public sealed class OpenAIAdapter : IAiProviderAdapter
 {
     private const string Endpoint = "https://api.openai.com/v1/chat/completions";
+    /// <summary>Araçlı + muhakemeli yüzeylerin yolu; policy'de <c>UseResponsesApi</c> ile seçilir.</summary>
+    private const string ResponsesEndpoint = "https://api.openai.com/v1/responses";
 
     private readonly HttpClient _httpClient;
     private readonly AiOptions _options;
@@ -146,6 +148,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         if (!IsConfigured)
             throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
+        if (request.UseResponsesApi)
+            return await CompleteViaResponsesAsync(request, cancellationToken);
+
         var model = request.Model ?? _options.OpenAI.Model;   // policy override (ör. admin → gpt-5)
         var hasTools = request.Tools is { Count: > 0 };
         var body = new Dictionary<string, object?>
@@ -179,5 +184,179 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
         }
         return AiAdapterHelpers.ParseChatResult(json, AiProvider.OpenAI, model);
+    }
+
+    /// <summary>
+    /// Aynı sözleşmenin <c>/v1/responses</c> üzerinden koşan hâli. Çağıran (runner) bu yolu bilmez —
+    /// mesaj listesi verir, sonuç alır; tek fark dönen <see cref="AiChatResult.ResponseId"/>.
+    ///
+    /// İki kazanç: (1) araçlarla birlikte reasoning gönderilebiliyor — chat/completions'ta gpt-5.6
+    /// bunu 400 ile reddediyor; (2) <c>previous_response_id</c> ile geçmiş OpenAI'da kalıyor, model
+    /// araç turları arasında kendi planını yeniden kurmuyor.
+    ///
+    /// ⚠️ Zincir <c>store</c>'a bağlı: <c>store:false</c> ile ikinci tur 400 "not found" veriyor
+    /// (ölçüldü). Yani zincir açıkken istek/yanıt OpenAI'da 30 gün duruyor — bilinçli karar,
+    /// gerekirse <c>DELETE /v1/responses/{id}</c> ile erken silinebilir.
+    /// </summary>
+    private async Task<AiChatResult> CompleteViaResponsesAsync(AiChatRequest request, CancellationToken cancellationToken)
+    {
+        var model = request.Model ?? _options.OpenAI.Model;
+        var hasTools = request.Tools is { Count: > 0 };
+
+        var body = new Dictionary<string, object?>
+        {
+            ["model"] = model,
+            // Zincir varsa YALNIZ yeni kalemler gider (araç sonuçları); yoksa konuşmanın tamamı.
+            ["input"] = BuildResponsesInput(request),
+        };
+
+        // System prompt Responses'ta ayrı bir alan. Zincirin ikinci turunda tekrar gönderilmez —
+        // önceki yanıt onu zaten taşıyor, tekrarı hem gereksiz token hem çelişki riski.
+        if (request.PreviousResponseId is null)
+        {
+            var system = request.Messages.FirstOrDefault(m => m.Role == "system")?.Content;
+            if (!string.IsNullOrWhiteSpace(system)) body["instructions"] = system;
+        }
+        else
+        {
+            body["previous_response_id"] = request.PreviousResponseId;
+        }
+
+        if (request.MaxOutputTokens is int maxTokens) body["max_output_tokens"] = maxTokens;
+        // Değer OLDUĞU GİBİ gider: bu API'nin varlık sebebi zaten araçla birlikte muhakemeye izin
+        // vermesi. "minimal" yalnız eski kuşakta geçerli, burada kullanılmaz.
+        if (!string.IsNullOrWhiteSpace(request.ReasoningEffort))
+            body["reasoning"] = new { effort = request.ReasoningEffort };
+        if (hasTools)
+        {
+            body["tools"] = BuildResponsesTools(request.Tools!);
+            body["tool_choice"] = "auto";
+        }
+
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, ResponsesEndpoint);
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey!);
+        httpRequest.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
+
+        using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+        var json = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            _logger.LogWarning("OpenAI responses çağrısı başarısız ({Status}): {Body}", (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
+            throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
+        }
+        return ParseResponsesResult(json, model);
+    }
+
+    /// <summary>Responses şemasında araç tanımı: function alanları düz, iç içe değil.</summary>
+    private static List<object> BuildResponsesTools(IReadOnlyList<AiToolDefinition> tools) =>
+        tools.Select(t => (object)new
+        {
+            type = "function",
+            name = t.Name,
+            description = t.Description,
+            parameters = JsonSerializer.Deserialize<JsonElement>(t.ParametersJsonSchema),
+        }).ToList();
+
+    /// <summary>
+    /// Mesaj listesi → Responses "input" kalemleri. Zincir varsa yalnız son turda eklenen araç
+    /// sonuçları gönderilir; geçmişi tekrar göndermek hem token israfı hem de "aynı şey iki kez
+    /// anlatıldı" hâli demek.
+    /// </summary>
+    private static List<object> BuildResponsesInput(AiChatRequest request)
+    {
+        var items = new List<object>();
+
+        if (request.PreviousResponseId is not null)
+        {
+            foreach (var m in request.Messages.Where(m => m.Role == "tool").TakeLast(CountTrailingToolMessages(request.Messages)))
+                items.Add(new { type = "function_call_output", call_id = m.ToolCallId, output = m.Content ?? string.Empty });
+            return items;
+        }
+
+        foreach (var m in request.Messages)
+        {
+            switch (m.Role)
+            {
+                case "system":
+                    break;   // instructions alanına gitti
+                case "tool":
+                    items.Add(new { type = "function_call_output", call_id = m.ToolCallId, output = m.Content ?? string.Empty });
+                    break;
+                case "assistant" when m.ToolCalls is { Count: > 0 }:
+                    // Zincirsiz yeniden oynatma (ör. Groq'a düşüp geri dönme): modelin geçmiş araç
+                    // taleplerini de kaleme dökmek gerekir, yoksa sonuçlar sahipsiz kalır.
+                    foreach (var call in m.ToolCalls)
+                        items.Add(new { type = "function_call", call_id = call.Id, name = call.Name, arguments = call.ArgumentsJson });
+                    if (!string.IsNullOrWhiteSpace(m.Content))
+                        items.Add(new { role = "assistant", content = m.Content });
+                    break;
+                default:
+                    if (!string.IsNullOrWhiteSpace(m.Content))
+                        items.Add(new { role = m.Role, content = m.Content });
+                    break;
+            }
+        }
+        return items;
+    }
+
+    /// <summary>Listenin sonundaki kesintisiz araç mesajı sayısı = bu turda eklenen sonuçlar.</summary>
+    private static int CountTrailingToolMessages(IReadOnlyList<AiChatMessage> messages)
+    {
+        var n = 0;
+        for (var i = messages.Count - 1; i >= 0 && messages[i].Role == "tool"; i--) n++;
+        return n;
+    }
+
+    /// <summary>Responses yanıtı: output dizisi (reasoning · function_call · message) + usage.</summary>
+    private static AiChatResult ParseResponsesResult(string json, string model)
+    {
+        using var doc = JsonDocument.Parse(json);
+        var root = doc.RootElement;
+
+        var text = new StringBuilder();
+        var toolCalls = new List<AiToolCall>();
+
+        if (root.TryGetProperty("output", out var output) && output.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in output.EnumerateArray())
+            {
+                var type = item.TryGetProperty("type", out var t) ? t.GetString() : null;
+                switch (type)
+                {
+                    case "function_call":
+                        toolCalls.Add(new AiToolCall
+                        {
+                            Id = item.TryGetProperty("call_id", out var cid) ? cid.GetString() ?? string.Empty : string.Empty,
+                            Name = item.TryGetProperty("name", out var n) ? n.GetString() ?? string.Empty : string.Empty,
+                            ArgumentsJson = item.TryGetProperty("arguments", out var a) ? a.GetString() ?? "{}" : "{}",
+                        });
+                        break;
+                    case "message":
+                        if (item.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+                            foreach (var part in content.EnumerateArray())
+                                if (part.TryGetProperty("text", out var pt)) text.Append(pt.GetString());
+                        break;
+                    // "reasoning" kalemi bilerek okunmuyor: içeriği bize ait değil, zincirde
+                    // OpenAI tarafında taşınıyor. Loglamak da istemeyiz.
+                }
+            }
+        }
+
+        int inputTokens = 0, outputTokens = 0;
+        if (root.TryGetProperty("usage", out var usage))
+        {
+            if (usage.TryGetProperty("input_tokens", out var i)) inputTokens = i.GetInt32();
+            if (usage.TryGetProperty("output_tokens", out var o)) outputTokens = o.GetInt32();
+        }
+
+        return new AiChatResult
+        {
+            Text = text.Length > 0 ? text.ToString() : null,
+            ToolCalls = toolCalls,
+            Provider = AiProvider.OpenAI,
+            Model = model,
+            Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
+            ResponseId = root.TryGetProperty("id", out var id) ? id.GetString() : null,
+        };
     }
 }

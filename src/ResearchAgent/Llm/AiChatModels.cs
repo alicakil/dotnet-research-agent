@@ -58,6 +58,26 @@ public sealed class AiChatRequest
     /// yürütmeden konuşuyordu ve zor sorularda düşünme bütçesini yiyip BOŞ cevap dönüyordu.
     /// </summary>
     public string? ReasoningEffort { get; init; }
+
+    /// <summary>
+    /// OpenAI çağrısı <c>/v1/responses</c> üzerinden yapılsın mı (policy'den gelir). Diğer
+    /// sağlayıcılar (Groq) bunu yok sayar — onlarda tek şema var.
+    /// </summary>
+    public bool UseResponsesApi { get; init; }
+
+    /// <summary>
+    /// Responses zincirinin bir önceki adımı. Doluysa adapter yalnız YENİ kalemleri (araç
+    /// sonuçlarını) gönderir; geçmiş — modelin kendi muhakeme kalemi dahil — OpenAI tarafında durur.
+    ///
+    /// Muhakeme kalemini taşımanın anlamı: model ilk turda "önce fiyat aracını çağırayım" diye bir
+    /// plan kuruyor. O plan taşınmazsa ikinci turda eline dönen araç verisi bağlamsız kalır ve model
+    /// baştan düşünmeye başlar — daha yavaş, daha pahalı ve tur turdan bağımsız olduğu için daha
+    /// tutarsız. Zincirle ikinci turda muhakeme token'ı 0 ölçüldü.
+    ///
+    /// Groq'a fallback edilirse null kalır ve tam mesaj listesi gönderilir — zincir bir hızlandırma,
+    /// bir bağımlılık değil.
+    /// </summary>
+    public string? PreviousResponseId { get; init; }
 }
 
 /// <summary>Tool-calling sonucu: ya final <see cref="Text"/>, ya da <see cref="ToolCalls"/> (araç talebi).</summary>
@@ -68,4 +88,10 @@ public sealed class AiChatResult
     public required AiProvider Provider { get; init; }
     public required string Model { get; init; }
     public required AiUsage Usage { get; init; }
+
+    /// <summary>
+    /// Responses yolunda bu turun id'si; runner bir sonraki tura <c>PreviousResponseId</c> olarak
+    /// verir. chat/completions ve Groq yolunda null — runner o zaman tam mesaj listesiyle devam eder.
+    /// </summary>
+    public string? ResponseId { get; init; }
 }
