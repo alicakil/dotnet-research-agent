@@ -194,6 +194,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
     /// bunu 400 ile reddediyor; (2) <c>previous_response_id</c> ile geçmiş OpenAI'da kalıyor, model
     /// araç turları arasında kendi planını yeniden kurmuyor.
     ///
+    /// ⚠️ Zincir GEÇMİŞİ taşır ama <c>instructions</c>'ı TAŞIMAZ — sistem promptu her turda
+    /// yeniden gönderilir (aşağıda, gerekçesiyle).
+    ///
     /// ⚠️ Zincir <c>store</c>'a bağlı: <c>store:false</c> ile ikinci tur 400 "not found" veriyor
     /// (ölçüldü). Yani zincir açıkken istek/yanıt OpenAI'da 30 gün duruyor — bilinçli karar,
     /// gerekirse <c>DELETE /v1/responses/{id}</c> ile erken silinebilir.
@@ -210,17 +213,20 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             ["input"] = BuildResponsesInput(request),
         };
 
-        // System prompt Responses'ta ayrı bir alan. Zincirin ikinci turunda tekrar gönderilmez —
-        // önceki yanıt onu zaten taşıyor, tekrarı hem gereksiz token hem çelişki riski.
-        if (request.PreviousResponseId is null)
-        {
-            var system = request.Messages.FirstOrDefault(m => m.Role == "system")?.Content;
-            if (!string.IsNullOrWhiteSpace(system)) body["instructions"] = system;
-        }
-        else
-        {
+        // System prompt Responses'ta ayrı bir alan — ve zincirin HER turunda tekrar gönderilir.
+        // ⚠️ Sezgiye ters ama OpenAI'ın sözleşmesi bu: `previous_response_id` ile `instructions`
+        // DEVRALINMAZ (kasıtlı — sistem mesajını turlar arası değiştirebilesin diye). Eskiden
+        // burada "önceki yanıt onu zaten taşıyor" varsayımıyla atlanıyordu ve sonuç şuydu: araç
+        // turundan sonraki cevap KURALSIZ üretiliyordu. 29 Ağu 2026'da support eval'inde ölçüldü —
+        // 2. turun girdisi 6.077 → 460 token'a düşüyor (prompt yok) ve model tam o turda ekran
+        // görüntüsü istiyor, [[action:...]] işaretini düşürüyor, ekran tarifi veriyor; yani promptun
+        // yasakladığı üç davranış birden geri geliyor. Tekrarın bedeli neredeyse sıfır: aynı önek
+        // olduğu için önbellekten geliyor.
+        var system = request.Messages.FirstOrDefault(m => m.Role == "system")?.Content;
+        if (!string.IsNullOrWhiteSpace(system)) body["instructions"] = system;
+
+        if (request.PreviousResponseId is not null)
             body["previous_response_id"] = request.PreviousResponseId;
-        }
 
         if (request.MaxOutputTokens is int maxTokens) body["max_output_tokens"] = maxTokens;
         // Değer OLDUĞU GİBİ gider: bu API'nin varlık sebebi zaten araçla birlikte muhakemeye izin
