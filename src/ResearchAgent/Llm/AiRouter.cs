@@ -89,7 +89,7 @@ public sealed class AiRouter : IAiCompletionService
                 var result = await adapter.CompleteAsync(effectiveRequest, cancellationToken);
 
                 // 4. Metering — krediyi düş + ledger'a başarı satırı yaz.
-                await _creditService.RecordSuccessAsync(tenantId, userId, request.TaskType, result, policy.CreditCost, cancellationToken);
+                await _creditService.RecordSuccessAsync(tenantId, userId, request.TaskType, result, policy.CreditCost, cancellationToken: cancellationToken);
 
                 _logger.LogInformation(
                     "AI tamamlandı: tenant={TenantId}, task={Task}, provider={Provider}, in={In}, out={Out}, kredi={Credit}",

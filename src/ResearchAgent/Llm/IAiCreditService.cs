@@ -15,8 +15,15 @@ public interface IAiCreditService
     /// </summary>
     Task EnsureCanSpendAsync(string tenantId, int creditCost, CancellationToken cancellationToken = default);
 
-    /// <summary>Başarılı çağrı: krediyi düş (önce allowance, biterse purchased) + ledger'a başarı satırı yaz.</summary>
-    Task RecordSuccessAsync(string tenantId, Guid userId, AiTaskType taskType, AiCompletionResult result, int creditCost, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Başarılı çağrı: krediyi düş (önce allowance, biterse purchased) + ledger'a başarı satırı yaz.
+    /// </summary>
+    /// <param name="costUsdOverride">
+    /// Maliyeti token yerine BAŞKA bir birimden faturalanan işler için ($). Video böyle: Veo saniye
+    /// başına ücretlendiriliyor, token üretmiyor — override verilmezse ledger'a $0 düşer ve harcama
+    /// admin panelinde görünmez olur. Metin/chat çağrılarında null bırakılır (token×fiyat kullanılır).
+    /// </param>
+    Task RecordSuccessAsync(string tenantId, Guid userId, AiTaskType taskType, AiCompletionResult result, int creditCost, decimal? costUsdOverride = null, CancellationToken cancellationToken = default);
 
     /// <summary>Başarısız çağrı: kredi DÜŞÜLMEZ; ledger'a 0-kredili hata satırı yazılır (audit/debug).</summary>
     Task RecordFailureAsync(string tenantId, Guid userId, AiTaskType taskType, string? error, CancellationToken cancellationToken = default);
