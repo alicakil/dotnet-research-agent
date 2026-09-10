@@ -49,11 +49,15 @@ public interface IAiCreditService
 /// Cüzdanın salt-okunur görüntüsü. <paramref name="AllowanceRemaining"/> dönem sonunda YANAR;
 /// <paramref name="PurchasedRemaining"/> devreder ama <paramref name="PurchasedExpiresAt"/>'te sona erer
 /// (kova boşsa null). Bkz. docs/wiki/ai-mimarisi.md §6.1.
+///
+/// <paramref name="AllowanceRenewsAt"/> tenant'ın KENDİ yenileme günü (kuruluş tarihi çapası, ayın 1'i
+/// DEĞİL) — arayüz "kaç gün kaldı"yı bundan hesaplar, kendi takvim hesabını yapmaz.
 /// </summary>
 public readonly record struct AiCreditBalanceSnapshot(
     int AllowanceRemaining,
     int PurchasedRemaining,
-    DateTime? PurchasedExpiresAt)
+    DateTime? PurchasedExpiresAt,
+    DateTime AllowanceRenewsAt)
 {
     /// <summary>Harcanabilir toplam (her iki kova).</summary>
     public int Total => AllowanceRemaining + PurchasedRemaining;
