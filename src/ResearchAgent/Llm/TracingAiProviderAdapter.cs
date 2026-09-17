@@ -68,15 +68,14 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
             var result = await _inner.CompleteChatAsync(request, cancellationToken);
             sw.Stop();
             var response = JsonSerializer.Serialize(new { text = result.Text, toolCalls = result.ToolCalls });
-            var (inPrice, outPrice) = _options.GetModelPrice(result.Provider, result.Model);
-            var cost = (result.Usage.InputTokens / 1_000_000m) * inPrice + (result.Usage.OutputTokens / 1_000_000m) * outPrice;
             var trace = NewTrace(request.TaskType, systemText, conversation);
             trace.Provider = result.Provider.ToString();
             trace.Model = result.Model;
             trace.ResponseText = response;
             trace.InputTokens = result.Usage.InputTokens;
             trace.OutputTokens = result.Usage.OutputTokens;
-            trace.CostUsd = cost;
+            trace.CachedInputTokens = result.Usage.CachedInputTokens;
+            trace.CostUsd = _options.ComputeCostUsd(result.Provider, result.Model, result.Usage);
             trace.LatencyMs = (int)sw.ElapsedMilliseconds;
             trace.Success = true;
             await SafeRecord(trace, cancellationToken);
@@ -91,11 +90,8 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
         }
     }
 
-    private decimal ComputeCost(AiCompletionResult result)
-    {
-        var (inPrice, outPrice) = _options.GetModelPrice(result.Provider, result.Model);
-        return (result.Usage.InputTokens / 1_000_000m) * inPrice + (result.Usage.OutputTokens / 1_000_000m) * outPrice;
-    }
+    private decimal ComputeCost(AiCompletionResult result) =>
+        _options.ComputeCostUsd(result.Provider, result.Model, result.Usage);
 
     /// <summary>Kimlik sütunlarını ambient bağlamdan doldurulmuş taze bir trace iskeleti.</summary>
     private AiTraceEntity NewTrace(AiTaskType taskType, string? systemPrompt, string? userPrompt) => new()
@@ -133,6 +129,7 @@ internal static class AiTraceEntityExtensions
         trace.ResponseText = result.Text;
         trace.InputTokens = result.Usage.InputTokens;
         trace.OutputTokens = result.Usage.OutputTokens;
+        trace.CachedInputTokens = result.Usage.CachedInputTokens;
         trace.CostUsd = costUsd;
         trace.LatencyMs = (int)latencyMs;
         trace.Success = true;

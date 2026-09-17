@@ -126,19 +126,12 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
                 "Akıl yürütme bütçeyi tüketmiş olabilir — MaxOutputTokens'ı yükseltin ya da eforu düşürün.");
         }
 
-        int inputTokens = 0, outputTokens = 0;
-        if (root.TryGetProperty("usage", out var usage))
-        {
-            if (usage.TryGetProperty("prompt_tokens", out var p)) inputTokens = p.GetInt32();
-            if (usage.TryGetProperty("completion_tokens", out var c)) outputTokens = c.GetInt32();
-        }
-
         return new AiCompletionResult
         {
             Text = text,
             Provider = AiProvider.OpenAI,
             Model = model,
-            Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
+            Usage = AiAdapterHelpers.ParseUsage(root, "prompt_tokens", "completion_tokens", "prompt_tokens_details"),
         };
     }
 
@@ -348,12 +341,6 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             }
         }
 
-        int inputTokens = 0, outputTokens = 0;
-        if (root.TryGetProperty("usage", out var usage))
-        {
-            if (usage.TryGetProperty("input_tokens", out var i)) inputTokens = i.GetInt32();
-            if (usage.TryGetProperty("output_tokens", out var o)) outputTokens = o.GetInt32();
-        }
 
         return new AiChatResult
         {
@@ -361,7 +348,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             ToolCalls = toolCalls,
             Provider = AiProvider.OpenAI,
             Model = model,
-            Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
+            Usage = AiAdapterHelpers.ParseUsage(root, "input_tokens", "output_tokens", "input_tokens_details"),
             ResponseId = root.TryGetProperty("id", out var id) ? id.GetString() : null,
         };
     }

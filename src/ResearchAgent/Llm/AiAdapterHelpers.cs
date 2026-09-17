@@ -129,20 +129,38 @@ internal static class AiAdapterHelpers
             }
         }
 
-        int inputTokens = 0, outputTokens = 0;
-        if (root.TryGetProperty("usage", out var usage))
-        {
-            if (usage.TryGetProperty("prompt_tokens", out var p)) inputTokens = p.GetInt32();
-            if (usage.TryGetProperty("completion_tokens", out var c)) outputTokens = c.GetInt32();
-        }
-
         return new AiChatResult
         {
             Text = text,
             ToolCalls = toolCalls,
             Provider = provider,
             Model = model,
-            Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
+            Usage = ParseUsage(root, "prompt_tokens", "completion_tokens", "prompt_tokens_details"),
+        };
+    }
+
+    /// <summary>
+    /// OpenAI-uyumlu <c>usage</c> bloğu. Chat Completions: <c>prompt_tokens</c> +
+    /// <c>prompt_tokens_details.cached_tokens</c>; Responses: <c>input_tokens</c> +
+    /// <c>input_tokens_details.cached_tokens</c>. Alan yoksa 0 (Groq bazı modellerde göndermiyor).
+    /// </summary>
+    public static AiUsage ParseUsage(JsonElement root, string inputProp, string outputProp, string detailsProp)
+    {
+        if (!root.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+            return new AiUsage();
+
+        int Read(JsonElement el, string prop) =>
+            el.TryGetProperty(prop, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : 0;
+
+        var cached = usage.TryGetProperty(detailsProp, out var details) && details.ValueKind == JsonValueKind.Object
+            ? Read(details, "cached_tokens")
+            : 0;
+
+        return new AiUsage
+        {
+            InputTokens = Read(usage, inputProp),
+            OutputTokens = Read(usage, outputProp),
+            CachedInputTokens = cached,
         };
     }
 }

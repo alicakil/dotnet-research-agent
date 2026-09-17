@@ -61,7 +61,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
         };
         messages.AddRange(conversation);
 
-        int totalIn = 0, totalOut = 0;
+        int totalIn = 0, totalOut = 0, totalCached = 0;
         AiProvider provider = default;
         var model = string.Empty;
 
@@ -86,6 +86,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
             var result = await CallWithFallbackAsync(policy, req, cancellationToken);
             totalIn += result.Usage.InputTokens;
             totalOut += result.Usage.OutputTokens;
+            totalCached += result.Usage.CachedInputTokens;
             provider = result.Provider;
             model = result.Model;
             // Groq (veya chat/completions) döndüyse null olur → sonraki tur tam listeyle gider.
@@ -93,7 +94,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
 
             // Araç çağrısı yoksa → final cevap.
             if (result.ToolCalls.Count == 0)
-                return Done(result.Text ?? string.Empty, provider, model, totalIn, totalOut);
+                return Done(result.Text ?? string.Empty, provider, model, totalIn, totalOut, totalCached);
 
             // assistant turn'ü (araç talepleriyle) + her aracın sonucunu (tool mesajı) ekle.
             messages.Add(new AiChatMessage { Role = "assistant", Content = result.Text, ToolCalls = result.ToolCalls });
@@ -116,15 +117,15 @@ public sealed class AiAgentRunner : IAiAgentRunner
         _logger.LogWarning("AiAgentRunner iterasyon limitine ({Max}) ulaştı (task={Task}).", MaxIterations, taskType);
         return Done(
             "Bu konuda tam yardımcı olamadım — lütfen WhatsApp ya da destek görüşmesiyle bize ulaşın.",
-            provider, model, totalIn, totalOut);
+            provider, model, totalIn, totalOut, totalCached);
     }
 
-    private static AiAgentResult Done(string text, AiProvider provider, string model, int inTok, int outTok) => new()
+    private static AiAgentResult Done(string text, AiProvider provider, string model, int inTok, int outTok, int cachedTok) => new()
     {
         Text = text,
         Provider = provider,
         Model = model,
-        Usage = new AiUsage { InputTokens = inTok, OutputTokens = outTok },
+        Usage = new AiUsage { InputTokens = inTok, OutputTokens = outTok, CachedInputTokens = cachedTok },
     };
 
     /// <summary>Politikadaki sağlayıcıları sırayla dener (OpenAI→Groq); ilk başarılı sonucu döner.</summary>

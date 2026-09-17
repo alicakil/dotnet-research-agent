@@ -93,11 +93,12 @@ public sealed class GeminiAdapter : IAiProviderAdapter
             text = textEl.GetString() ?? string.Empty;
         }
 
-        int inputTokens = 0, outputTokens = 0;
+        int inputTokens = 0, outputTokens = 0, cachedTokens = 0;
         if (root.TryGetProperty("usageMetadata", out var usage))
         {
             if (usage.TryGetProperty("promptTokenCount", out var p)) inputTokens = p.GetInt32();
             if (usage.TryGetProperty("candidatesTokenCount", out var c)) outputTokens = c.GetInt32();
+            if (usage.TryGetProperty("cachedContentTokenCount", out var k)) cachedTokens = k.GetInt32();
         }
 
         return new AiCompletionResult
@@ -105,7 +106,7 @@ public sealed class GeminiAdapter : IAiProviderAdapter
             Text = text,
             Provider = AiProvider.Gemini,
             Model = model,
-            Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens },
+            Usage = new AiUsage { InputTokens = inputTokens, OutputTokens = outputTokens, CachedInputTokens = cachedTokens },
         };
     }
 }
