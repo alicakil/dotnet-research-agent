@@ -46,14 +46,14 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
             var result = await _inner.CompleteAsync(request, cancellationToken);
             sw.Stop();
             await SafeRecord(NewTrace(request.TaskType, systemText, request.UserPrompt)
-                .WithSuccess(result, sw.ElapsedMilliseconds, ComputeCost(result)), cancellationToken);
+                .WithSuccess(result, sw.ElapsedMilliseconds, ComputeCost(result)), request.TaskType, cancellationToken);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
             await SafeRecord(NewTrace(request.TaskType, systemText, request.UserPrompt)
-                .WithFailure(ex, sw.ElapsedMilliseconds), cancellationToken);
+                .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType, cancellationToken);
             throw;   // router fallback'i sürsün
         }
     }
@@ -78,14 +78,14 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
             trace.CostUsd = _options.ComputeCostUsd(result.Provider, result.Model, result.Usage);
             trace.LatencyMs = (int)sw.ElapsedMilliseconds;
             trace.Success = true;
-            await SafeRecord(trace, cancellationToken);
+            await SafeRecord(trace, request.TaskType, cancellationToken);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
             await SafeRecord(NewTrace(request.TaskType, systemText, conversation)
-                .WithFailure(ex, sw.ElapsedMilliseconds), cancellationToken);
+                .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType, cancellationToken);
             throw;
         }
     }
@@ -112,8 +112,16 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
         CreatedBy = _context.UserId?.ToString() ?? "system",
     };
 
-    private async Task SafeRecord(AiTraceEntity trace, CancellationToken cancellationToken)
+    private async Task SafeRecord(AiTraceEntity trace, AiTaskType taskType, CancellationToken cancellationToken)
     {
+        // Kişisel sağlık metni taşıyan işlerde giden metin ve yanıt ize yazılmaz: iz tablosu 180 gün saklanır ve admin
+        // asistanı okur. Sistem istemi (sabit metin), süre, token, maliyet ve hata yine yazılır.
+        if (!AiTaskTaxonomy.TracesContent(taskType))
+        {
+            trace.UserPrompt = null;
+            trace.ResponseText = null;
+        }
+
         // Recorder zaten fail-safe; yine de trace yazımı istek iptalinden etkilenmesin (CancellationToken.None).
         await _recorder.RecordAsync(trace, CancellationToken.None);
     }
