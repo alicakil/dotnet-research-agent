@@ -18,9 +18,10 @@ public class TracingAiProviderAdapterTests
     private const string Answer = "{\"kind\":\"Problem\",\"title\":\"Mide yanması\"}";
 
     [Fact]
-    public void Health_capture_is_the_task_that_does_not_trace_content()
+    public void Health_tasks_are_the_tasks_that_do_not_trace_content()
     {
         AiTaskTaxonomy.TracesContent(AiTaskType.HealthCapture).Should().BeFalse();
+        AiTaskTaxonomy.TracesContent(AiTaskType.HealthDocument).Should().BeFalse();
         AiTaskTaxonomy.TracesContent(AiTaskType.WorkVoiceNote).Should().BeTrue();
     }
 
