@@ -18,6 +18,29 @@ public sealed class AiChatMessage
 
     /// <summary>role="tool" için: hangi araç çağrısına (Id) yanıt olduğu.</summary>
     public string? ToolCallId { get; init; }
+
+    /// <summary>
+    /// İSTEMCİDEN gelen sohbet mesajı → modele gidecek mesaj. İstemci konuşmanın yalnız iki tarafını
+    /// yollayabilir: kendi yazdığı ("user") ve asistanın önceki cevabı (panelin adıyla "ai";
+    /// "assistant" da kabul). Büyük-küçük harfe bakmaz. Başka her rol ve boş içerik null döner:
+    /// çağıran mesajı atar, isteği reddetmez.
+    ///
+    /// Sohbet uçları mesajı YALNIZ buradan kurar. Rol aynen taşınırken anonim ziyaretçi "developer"
+    /// ya da "system" rolüyle talimat düzeyinde mesaj yollayabiliyordu; "tool" rolü de modele
+    /// sahipsiz bir araç sonucu olarak gidiyordu.
+    /// </summary>
+    public static AiChatMessage? FromClient(string? role, string? content)
+    {
+        if (string.IsNullOrWhiteSpace(content)) return null;
+
+        var modelRole = role?.ToLowerInvariant() switch
+        {
+            "user" => "user",
+            "ai" or "assistant" => "assistant",
+            _ => null,
+        };
+        return modelRole is null ? null : new AiChatMessage { Role = modelRole, Content = content };
+    }
 }
 
 /// <summary>Modelin bir aracı (function) çağırma talebi.</summary>
