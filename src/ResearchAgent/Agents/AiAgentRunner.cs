@@ -65,8 +65,8 @@ public sealed class AiAgentRunner : IAiAgentRunner
         AiProvider provider = default;
         var model = string.Empty;
 
-        // Responses zincirinin son halkası. Mesaj listesi buna RAĞMEN eksiksiz tutulur: Groq'a
-        // fallback edilirse zincir yoktur, tek elimizde kalan tam geçmiştir.
+        // Responses zincirinin son halkası. Mesaj listesi buna RAĞMEN eksiksiz tutulur: zincir
+        // yoksa (chat/completions yolu, id'siz yanıt) tek elimizde kalan tam geçmiştir.
         string? previousResponseId = null;
 
         for (var iteration = 0; iteration < MaxIterations; iteration++)
@@ -89,7 +89,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
             totalCached += result.Usage.CachedInputTokens;
             provider = result.Provider;
             model = result.Model;
-            // Groq (veya chat/completions) döndüyse null olur → sonraki tur tam listeyle gider.
+            // chat/completions döndüyse null olur → sonraki tur tam listeyle gider.
             previousResponseId = result.ResponseId;
 
             // Araç çağrısı yoksa → final cevap.
@@ -128,7 +128,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
         Usage = new AiUsage { InputTokens = inTok, OutputTokens = outTok, CachedInputTokens = cachedTok },
     };
 
-    /// <summary>Politikadaki sağlayıcıları sırayla dener (OpenAI→Groq); ilk başarılı sonucu döner.</summary>
+    /// <summary>Politikadaki sağlayıcıları sırayla dener; ilk başarılı sonucu döner.</summary>
     private async Task<AiChatResult> CallWithFallbackAsync(AiTaskPolicy policy, AiChatRequest req, CancellationToken ct)
     {
         Exception? lastError = null;

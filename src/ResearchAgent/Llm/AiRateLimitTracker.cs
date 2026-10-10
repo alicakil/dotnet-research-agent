@@ -5,9 +5,13 @@ namespace WebApi.Services.Ai;
 
 /// <summary>
 /// Sağlayıcıların response header'larındaki CANLI rate-limit bilgisini (kalan/reset) tutar.
-/// In-memory (singleton), sağlayıcı başına en SON snapshot. Restart'ta sıfırlanır; ilk AI çağrısından
-/// sonra dolar. Groq/OpenAI <c>x-ratelimit-*</c> header'larını yakalar (Gemini bu header'ları döndürmez,
+/// In-memory (singleton), sağlayıcı başına en SON snapshot. Restart'ta sıfırlanır; <c>Record</c> çağıran
+/// ilk AI çağrısından sonra dolar. <c>x-ratelimit-*</c> header'larını okur (Gemini bu header'ları döndürmez,
 /// onun için snapshot oluşmaz). Bu, BİZİM saydığımız kullanımdan farklı: sağlayıcının canlı raporu.
+///
+/// ⚠️ Bugün <c>Record</c>'u çağıran adapter YOK: tek çağıranı, kaldırılan yedek sağlayıcının adapter'ıydı
+/// (VIT-39). Bir adapter çağırana dek liste boş döner ve admin Raporlar → Kullanım'daki "Canlı kota"
+/// bölümü görünmez.
 /// </summary>
 public interface IAiRateLimitTracker
 {

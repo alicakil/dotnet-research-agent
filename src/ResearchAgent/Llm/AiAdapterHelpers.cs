@@ -13,9 +13,10 @@ internal static class AiAdapterHelpers
     /// *"Unsupported value: 'reasoning_effort' does not support 'minimal' with this model.
     /// Supported values are: 'none', 'low', 'medium', 'high', 'xhigh'"* → OpenAI **400**.
     ///
-    /// Bu sessiz bir arıza türü: router 400'ü fallback sanıp Groq'a düşer, yanıt gelir, kimse
-    /// fark etmez — pinlenen pahalı model hiç kullanılmamış olur. (Tam olarak bu yaşandı:
-    /// gpt-5.6-terra pinlendiğinde her faturalama sohbeti llama'ya düştü; eval yakaladı.)
+    /// Yedek sağlayıcı varken bu SESSİZ bir arızaydı: router 400'ü fallback sanıp yedeğe düşüyor,
+    /// yanıt geliyor, kimse fark etmiyordu — pinlenen pahalı model hiç kullanılmamış oluyordu.
+    /// (Tam olarak bu yaşandı: gpt-5.6-terra pinlendiğinde her faturalama sohbeti yedeğin modeline
+    /// düştü; eval yakaladı.) Bugün yedek yok: yanlış değer çağrıyı doğrudan düşürür.
     ///
     /// Yeni kuşakta `low` seçiliyor, `none` değil: bir tık akıl yürütme yanıt kalitesine yarıyor,
     /// `minimal`in amacı olan "hız + ucuzluk" ise `low` ile büyük ölçüde korunuyor.
@@ -59,7 +60,7 @@ internal static class AiAdapterHelpers
     public static string Truncate(string value, int max = 500) =>
         value.Length <= max ? value : value[..max];
 
-    // ── Tool-calling (OpenAI-uyumlu) ortak yardımcıları (OpenAIAdapter + GroqAdapter paylaşır) ──
+    // ── Tool-calling (OpenAI-uyumlu) ortak yardımcıları ──
 
     /// <summary><see cref="AiChatMessage"/> listesini OpenAI chat-completions mesaj dizisine çevirir.</summary>
     public static List<object> BuildChatMessages(IReadOnlyList<AiChatMessage> messages)
@@ -142,7 +143,7 @@ internal static class AiAdapterHelpers
     /// <summary>
     /// OpenAI-uyumlu <c>usage</c> bloğu. Chat Completions: <c>prompt_tokens</c> +
     /// <c>prompt_tokens_details.cached_tokens</c>; Responses: <c>input_tokens</c> +
-    /// <c>input_tokens_details.cached_tokens</c>. Alan yoksa 0 (Groq bazı modellerde göndermiyor).
+    /// <c>input_tokens_details.cached_tokens</c>. Alan yoksa 0.
     /// </summary>
     public static AiUsage ParseUsage(JsonElement root, string inputProp, string outputProp, string detailsProp)
     {

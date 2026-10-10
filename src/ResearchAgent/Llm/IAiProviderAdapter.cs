@@ -1,7 +1,7 @@
 namespace WebApi.Services.Ai;
 
 /// <summary>
-/// Tek bir LLM sağlayıcısına (Gemini, Groq, Bedrock-Claude...) adapte olan sözleşme.
+/// Tek bir LLM sağlayıcısına (OpenAI, Gemini, Bedrock-Claude...) adapte olan sözleşme.
 /// <see cref="AiRouter"/> bu adapter'ları model politikasına göre sırayla dener: birincil
 /// başarısız/kota-dolu olursa bir sonrakine düşer (fallback).
 ///
@@ -34,7 +34,7 @@ public interface IAiProviderAdapter
 
     /// <summary>
     /// Tool-calling (function-calling) çok-turlu sohbet — agentic akış (support chatbot). Yalnızca
-    /// OpenAI-uyumlu sağlayıcılar (OpenAI, Groq) implemente eder; diğerleri NotSupportedException fırlatır
+    /// OpenAI-uyumlu sağlayıcılar (bugün OpenAI) implemente eder; diğerleri NotSupportedException fırlatır
     /// (router uygun sağlayıcıyı seçer). Single-shot <see cref="CompleteAsync"/>'i etkilemez.
     /// </summary>
     Task<AiChatResult> CompleteChatAsync(AiChatRequest request, CancellationToken cancellationToken = default)

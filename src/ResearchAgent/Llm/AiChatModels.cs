@@ -61,7 +61,7 @@ public sealed class AiChatRequest
 
     /// <summary>
     /// OpenAI çağrısı <c>/v1/responses</c> üzerinden yapılsın mı (policy'den gelir). Diğer
-    /// sağlayıcılar (Groq) bunu yok sayar — onlarda tek şema var.
+    /// sağlayıcılar bunu yok sayar — onlarda tek şema var.
     /// </summary>
     public bool UseResponsesApi { get; init; }
 
@@ -74,7 +74,7 @@ public sealed class AiChatRequest
     /// baştan düşünmeye başlar — daha yavaş, daha pahalı ve tur turdan bağımsız olduğu için daha
     /// tutarsız. Zincirle ikinci turda muhakeme token'ı 0 ölçüldü.
     ///
-    /// Groq'a fallback edilirse null kalır ve tam mesaj listesi gönderilir — zincir bir hızlandırma,
+    /// Null ise tam mesaj listesi gönderilir — zincir bir hızlandırma,
     /// bir bağımlılık değil.
     /// </summary>
     public string? PreviousResponseId { get; init; }
@@ -91,7 +91,7 @@ public sealed class AiChatResult
 
     /// <summary>
     /// Responses yolunda bu turun id'si; runner bir sonraki tura <c>PreviousResponseId</c> olarak
-    /// verir. chat/completions ve Groq yolunda null — runner o zaman tam mesaj listesiyle devam eder.
+    /// verir. chat/completions yolunda null — runner o zaman tam mesaj listesiyle devam eder.
     /// </summary>
     public string? ResponseId { get; init; }
 }

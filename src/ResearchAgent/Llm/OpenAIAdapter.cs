@@ -7,9 +7,9 @@ namespace WebApi.Services.Ai;
 
 /// <summary>
 /// OpenAI (Chat Completions) adapter'ı — go-live primary sağlayıcı (paid). Varsayılan model gpt-5-mini.
-/// OpenAI-uyumlu şema (GroqAdapter ile aynı body); farklar: api.openai.com endpoint + <c>max_completion_tokens</c>
+/// Çıktı tavanı <c>max_completion_tokens</c> ile gider
 /// (GPT-5/o-serisi max_tokens kabul etmez). API anahtarı SSM→env (<c>Ai:OpenAI:ApiKey</c> / <c>OPENAI_API_KEY</c>).
-/// Key yoksa IsConfigured=false → AiRouter otomatik Groq (ücretsiz) fallback'ine düşer.
+/// Key yoksa IsConfigured=false → AiRouter sağlayıcıyı atlar; politikada başka sağlayıcı olmadığı için çağrı hata verir.
 /// </summary>
 public sealed class OpenAIAdapter : IAiProviderAdapter
 {
@@ -282,7 +282,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
                     items.Add(new { type = "function_call_output", call_id = m.ToolCallId, output = m.Content ?? string.Empty });
                     break;
                 case "assistant" when m.ToolCalls is { Count: > 0 }:
-                    // Zincirsiz yeniden oynatma (ör. Groq'a düşüp geri dönme): modelin geçmiş araç
+                    // Zincirsiz yeniden oynatma (önceki turun id'si yoksa): modelin geçmiş araç
                     // taleplerini de kaleme dökmek gerekir, yoksa sonuçlar sahipsiz kalır.
                     foreach (var call in m.ToolCalls)
                         items.Add(new { type = "function_call", call_id = call.Id, name = call.Name, arguments = call.ArgumentsJson });

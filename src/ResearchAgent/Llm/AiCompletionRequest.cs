@@ -55,7 +55,7 @@ public sealed class AiCompletionRequest
     /// <c>policy.Model</c>'i buraya geçirir; boşsa sağlayıcı ayarındaki model kullanılır.
     ///
     /// NOT: yalnızca OpenAI adapter'ı dikkate alır — model adları sağlayıcıya özgüdür.
-    /// Fallback'e düşüldüğünde (Groq/Gemini) o sağlayıcı KENDİ yapılandırılmış modelini
+    /// Başka bir sağlayıcıya (Gemini) düşüldüğünde o sağlayıcı KENDİ yapılandırılmış modelini
     /// kullanır; bu kasıtlı, aksi halde tanımadığı model adıyla 400 alırdı.
     /// </summary>
     public string? Model { get; init; }
