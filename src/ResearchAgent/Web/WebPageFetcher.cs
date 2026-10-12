@@ -257,7 +257,11 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return addresses.All(IsPublic) ? null : "private_address_blocked";
     }
 
-    private static bool IsPublic(IPAddress ip)
+    /// <summary>
+    /// Adres dışarıya açık mı: özel ağ, loopback, link-local, CGNAT ve ayrılmış aralıklar değil. Sağlık öyküsünün
+    /// dosya çekicisi de aynı kurala bakar (HealthRemoteFileFetcher): kural tek yerde dursun.
+    /// </summary>
+    public static bool IsPublic(IPAddress ip)
     {
         if (IPAddress.IsLoopback(ip)) return false;
 
