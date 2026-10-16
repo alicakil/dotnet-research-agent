@@ -293,6 +293,14 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private static readonly Regex TagRegex = new(@"<[^>]+>");
     private static readonly Regex WhitespaceRegex = new(@"[ \t   ]{2,}");
     private static readonly Regex MetaTagRegex = new(@"<meta\b[^>]*>", RegexOptions.IgnoreCase);
+
+    /// <summary>
+    /// Boşluktan ibaret satırlar tek satır sonuna iner. Ölçüldü (16 Eki 2026, VIT-1020): bir doktortakvimi profilinin düz
+    /// metni 32 bin karakterdi ve bunun üçte biri boşluk satırlarıydı; 8.000 karakterlik tavan eğitim ve deneyim
+    /// bölümlerine (8.700-10.600) varmadan doluyordu. Sıkıştırınca aynı tavana özgeçmişin tamamı sığıyor (6.200-7.500),
+    /// hasta yorumları (9.000'den sonra) dışarıda kalıyor. Tavan aynı: modele giden metin büyümedi, boşluğu gitti.
+    /// </summary>
+    private static readonly Regex BlankLinesRegex = new(@"[ \t]*\n\s*");
     /// <summary>Öznitelik değeri — kapanış tırnağı AÇILIŞ tırnağıyla eşlenir; aksi halde
     /// içerikteki kesme işareti ("Bursa'da …") değeri erken keser.</summary>
     private static readonly Regex AttrRegex =
@@ -327,7 +335,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
 
         var body = ScriptStyleRegex.Replace(html, " ");
         body = TagRegex.Replace(body, " ");
-        body = Normalize(WebUtility.HtmlDecode(body));
+        body = BlankLinesRegex.Replace(Normalize(WebUtility.HtmlDecode(body)), "\n");
 
         return metaParts.Count > 0
             ? string.Join(" · ", metaParts.Distinct()) + "\n\n" + body
