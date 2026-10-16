@@ -27,6 +27,12 @@ public sealed class AiAgentResult
     public required AiProvider Provider { get; init; }
     public required string Model { get; init; }
     public required AiUsage Usage { get; init; }
+
+    /// <summary>
+    /// Döngüyü bitiren araç çağrıldıysa onun adı (<see cref="AiToolDefinition.EndsLoop"/>, VIT-1047 devir); yoksa null.
+    /// Doluysa <see cref="Text"/> kullanıcıya gidecek cevap değildir: çağıran işi başka yere (öbür asistana) verir.
+    /// </summary>
+    public string? EndedByTool { get; init; }
 }
 
 public sealed class AiAgentRunner : IAiAgentRunner
@@ -96,6 +102,12 @@ public sealed class AiAgentRunner : IAiAgentRunner
             if (result.ToolCalls.Count == 0)
                 return Done(result.Text ?? string.Empty, provider, model, totalIn, totalOut, totalCached);
 
+            // Döngüyü bitiren araç (devir): dispatch yok, bir tur daha yok; aynı turdaki öbür çağrılar da koşmaz,
+            // çünkü işi artık başkası yapacak. Bu turun maliyeti yine toplamda.
+            var ending = result.ToolCalls.FirstOrDefault(c => tools.Any(t => t.EndsLoop && t.Name == c.Name));
+            if (ending is not null)
+                return Done(result.Text ?? string.Empty, provider, model, totalIn, totalOut, totalCached, ending.Name);
+
             // assistant turn'ü (araç talepleriyle) + her aracın sonucunu (tool mesajı) ekle.
             messages.Add(new AiChatMessage { Role = "assistant", Content = result.Text, ToolCalls = result.ToolCalls });
             foreach (var call in result.ToolCalls)
@@ -120,9 +132,11 @@ public sealed class AiAgentRunner : IAiAgentRunner
             provider, model, totalIn, totalOut, totalCached);
     }
 
-    private static AiAgentResult Done(string text, AiProvider provider, string model, int inTok, int outTok, int cachedTok) => new()
+    private static AiAgentResult Done(
+        string text, AiProvider provider, string model, int inTok, int outTok, int cachedTok, string? endedByTool = null) => new()
     {
         Text = text,
+        EndedByTool = endedByTool,
         Provider = provider,
         Model = model,
         Usage = new AiUsage { InputTokens = inTok, OutputTokens = outTok, CachedInputTokens = cachedTok },

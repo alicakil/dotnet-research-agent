@@ -59,6 +59,13 @@ public sealed class AiToolDefinition
     public required string Description { get; init; }
     /// <summary>JSON Schema (object). Parametresiz araç: {"type":"object","properties":{}}.</summary>
     public required string ParametersJsonSchema { get; init; }
+
+    /// <summary>
+    /// Döngüyü bitiren araç (VIT-1047, iki asistan arası devir): model bunu çağırınca <see cref="AiAgentRunner"/> aracı
+    /// dispatch etmez, modeli bir tur daha koşturmaz; çağrıyı <see cref="AiAgentResult.EndedByTool"/> ile çağırana döner.
+    /// Sağlayıcıya gitmez (adapter yalnız ad, açıklama ve şemayı okur).
+    /// </summary>
+    public bool EndsLoop { get; init; }
 }
 
 /// <summary>Tool-calling sohbet isteği (multi-turn + araçlar). KİMLİK YOK.</summary>
