@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text.Json;
 using DAL.Entites;
 using Microsoft.Extensions.Options;
+using WebApi.Services.Ai.Find;
 
 namespace WebApi.Services.Ai;
 
@@ -41,18 +42,23 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
     {
         var sw = Stopwatch.StartNew();
         var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);   // modele giden BİREBİR sistem metni
+        // Bulucu kuralı (VIT-1049) tek atımlık yolda da: iz metni maskeli, modele giden istem değişmez.
+        var masks = MasksContacts(request.TaskType);
+        var tracedPrompt = masks ? FindTracePrivacy.MaskContacts(request.UserPrompt) : request.UserPrompt;
         try
         {
             var result = await _inner.CompleteAsync(request, cancellationToken);
             sw.Stop();
-            await SafeRecord(NewTrace(request.TaskType, systemText, request.UserPrompt)
-                .WithSuccess(result, sw.ElapsedMilliseconds, ComputeCost(result)), request.TaskType, cancellationToken);
+            var trace = NewTrace(request.TaskType, systemText, tracedPrompt)
+                .WithSuccess(result, sw.ElapsedMilliseconds, ComputeCost(result));
+            if (masks) trace.ResponseText = FindTracePrivacy.MaskContacts(trace.ResponseText);
+            await SafeRecord(trace, request.TaskType, cancellationToken);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
-            await SafeRecord(NewTrace(request.TaskType, systemText, request.UserPrompt)
+            await SafeRecord(NewTrace(request.TaskType, systemText, tracedPrompt)
                 .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType, cancellationToken);
             throw;   // router fallback'i sürsün
         }
@@ -62,12 +68,18 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
     {
         var sw = Stopwatch.StartNew();
         var systemText = request.Messages.FirstOrDefault(m => m.Role == "system")?.Content;
-        var conversation = JsonSerializer.Serialize(request.Messages);   // tam çok-turlu bağlam
+        // ize girmez, modele giden mesajlar değişmez.
+        var masks = MasksContacts(request.TaskType);
+        var conversation = JsonSerializer.Serialize(masks ? FindTracePrivacy.MaskConversation(request.Messages) : request.Messages);
         try
         {
             var result = await _inner.CompleteChatAsync(request, cancellationToken);
             sw.Stop();
-            var response = JsonSerializer.Serialize(new { text = result.Text, toolCalls = result.ToolCalls });
+            var response = JsonSerializer.Serialize(new
+            {
+                text = masks ? FindTracePrivacy.MaskContacts(result.Text) : result.Text,
+                toolCalls = result.ToolCalls,
+            });
             var trace = NewTrace(request.TaskType, systemText, conversation);
             trace.Provider = result.Provider.ToString();
             trace.Model = result.Model;
@@ -89,6 +101,9 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
             throw;
         }
     }
+
+    /// <summary>Bulucu yazışması mı (iş türü ya da bulucudan devralan çağrının bağlam anahtarı): metin maskeli yazılır.</summary>
+    private bool MasksContacts(AiTaskType taskType) => FindTracePrivacy.Covers(taskType.ToString(), _context.ContextKey);
 
     private decimal ComputeCost(AiCompletionResult result) =>
         _options.ComputeCostUsd(result.Provider, result.Model, result.Usage);
