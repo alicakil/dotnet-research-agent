@@ -12,8 +12,11 @@ namespace WebApi.Services.Ai;
 /// metinden AYRI tutuluyor çünkü kalitesi bambaşka: puan, yorum sayısı ve yorum metinleri orada
 /// etiketli duruyor — 29 bin karakterlik menü/footer gürültüsünün içinden çıkarılmasına gerek
 /// dolu; sıradan sitelerde boş ve bu normaldir.
+///
+/// <see cref="Html"/> sayfanın ham HTML'i (tavanlı); yalnız <see cref="WebPageFetcher.FetchHtmlAsync"/> doldurur (VIT-1082: dizin
+/// profilindeki fotoğrafların adresleri metinde değil, işaretlemede).
 /// </summary>
-public sealed record FetchedPage(string Url, bool Success, string? Text, string? SkipReason, string? Structured = null);
+public sealed record FetchedPage(string Url, bool Success, string? Text, string? SkipReason, string? Structured = null, string? Html = null);
 
 /// <summary>Sayfa çekme seam'i — derin araştırma servisi buna bağlanır, testler stub verir (ağ yok).</summary>
 public interface IWebPageFetcher
@@ -95,7 +98,15 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return hostPart.Contains('.', StringComparison.Ordinal) ? "https://" + trimmed : trimmed;
     }
 
-    public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
+    public Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default) => FetchCoreAsync(url, keepHtml: false, ct);
+
+    /// <summary>
+    /// <see cref="FetchAsync"/> ile aynı kurallar (SSRF, yönlendirme, tavan, giriş duvarı), sonuçta ham HTML de döner
+    /// (<see cref="FetchedPage.Html"/>): dizin profilindeki fotoğrafların adresi için (VIT-1082).
+    /// </summary>
+    public Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) => FetchCoreAsync(url, keepHtml: true, ct);
+
+    private async Task<FetchedPage> FetchCoreAsync(string url, bool keepHtml, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(url))
             return new FetchedPage(url, false, null, "empty_url");
@@ -114,7 +125,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         if (IsBlockedHost(url))
             return new FetchedPage(url, false, null, "blocked_host");
 
-        var page = await AttemptAsync(url, uri, ct);
+        var page = await AttemptAsync(url, uri, keepHtml, ct);
 
         // HTTPS'İ OLMAYAN SİTE. Küçük işletme sitelerinde sık: 443 sessizce yutuluyor (RST bile
         // dönmüyor, bağlantı asılı kalıyor), 80 çalışıyor ve oradan gerçek adrese yönlendiriyor.
@@ -131,7 +142,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
             && uri.IsDefaultPort)
         {
             var overHttp = new UriBuilder(uri) { Scheme = Uri.UriSchemeHttp, Port = -1 }.Uri;
-            var viaHttp = await AttemptAsync(url, overHttp, ct);
+            var viaHttp = await AttemptAsync(url, overHttp, keepHtml, ct);
             if (viaHttp.Success)
             {
                 logger.LogInformation("HTTPS yanıt vermedi, http'ye düşüldü: {Url}", url);
@@ -146,7 +157,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     /// Tek bir şemayla çekme denemesi. Kendi zaman aşımı saatiyle çalışır: http'ye düşme
     /// denemesinin, https'in tükettiği süreden arta kalanla değil, tam bütçeyle koşması gerekiyor.
     /// </summary>
-    private async Task<FetchedPage> AttemptAsync(string url, Uri start, CancellationToken ct)
+    private async Task<FetchedPage> AttemptAsync(string url, Uri start, bool keepHtml, CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         cts.CancelAfter(PerUrlTimeout);
@@ -195,7 +206,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                 // profillerinin değerli kısmı zaten JSON-LD'de duruyor.
                 return text.Length < 80 && structured is null
                     ? new FetchedPage(current.ToString(), false, null, "too_little_text")
-                    : new FetchedPage(current.ToString(), true, text, null, structured);
+                    : new FetchedPage(current.ToString(), true, text, null, structured, keepHtml ? html : null);
             }
 
             return new FetchedPage(url, false, null, "too_many_redirects");
