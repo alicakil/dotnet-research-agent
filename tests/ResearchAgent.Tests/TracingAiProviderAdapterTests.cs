@@ -22,7 +22,7 @@ public class TracingAiProviderAdapterTests
     {
         AiTaskTaxonomy.TracesContent(AiTaskType.HealthCapture).Should().BeFalse();
         AiTaskTaxonomy.TracesContent(AiTaskType.HealthDocument).Should().BeFalse();
-        AiTaskTaxonomy.TracesContent(AiTaskType.WorkVoiceNote).Should().BeTrue();
+        AiTaskTaxonomy.TracesContent(AiTaskType.MessagePolish).Should().BeTrue();
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public class TracingAiProviderAdapterTests
         var recorder = new CapturingRecorder();
         var adapter = Adapter(recorder, _ => Answer);
 
-        await adapter.CompleteAsync(Request(AiTaskType.WorkVoiceNote));
+        await adapter.CompleteAsync(Request(AiTaskType.MessagePolish));
 
         var trace = recorder.Traces.Should().ContainSingle().Subject;
         trace.UserPrompt.Should().Be(Sentence);
