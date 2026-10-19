@@ -81,7 +81,18 @@ public sealed class FirecrawlPageFetcher : IWebPageFetcher
                 ? src.GetString() ?? url
                 : url;
 
-            return new FetchedPage(final, true, Truncate(text!), null);
+            // Başlık (VIT-1185): adı yazılmadan linkle açılan kliniğin adı buradan çıkarılır.
+            string? title = null;
+            if (data.TryGetProperty("metadata", out var m))
+                foreach (var key in new[] { "ogTitle", "og:title", "title" })
+                    if (m.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String
+                        && !string.IsNullOrWhiteSpace(v.GetString()))
+                    {
+                        title = v.GetString()!.Trim();
+                        break;
+                    }
+
+            return new FetchedPage(final, true, Truncate(text!), null, Title: title);
         }
         catch (Exception ex)
         {

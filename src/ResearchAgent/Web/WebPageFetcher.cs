@@ -16,7 +16,11 @@ namespace WebApi.Services.Ai;
 /// <see cref="Html"/> sayfanın ham HTML'i (tavanlı); yalnız <see cref="WebPageFetcher.FetchHtmlAsync"/> doldurur (VIT-1082: dizin
 /// profilindeki fotoğrafların adresleri metinde değil, işaretlemede).
 /// </summary>
-public sealed record FetchedPage(string Url, bool Success, string? Text, string? SkipReason, string? Structured = null, string? Html = null);
+///
+/// <see cref="Title"/> sayfanın başlığı (og:title, yoksa &lt;title&gt;): adı yazılmadan linkle açılan kliniğin adı buradan
+public sealed record FetchedPage(
+    string Url, bool Success, string? Text, string? SkipReason, string? Structured = null, string? Html = null,
+    string? Title = null);
 
 /// <summary>Sayfa çekme seam'i — derin araştırma servisi buna bağlanır, testler stub verir (ağ yok).</summary>
 public interface IWebPageFetcher
@@ -201,12 +205,13 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                 var text = HtmlToText(html);
                 if (text.Length > MaxTextChars) text = text[..MaxTextChars];
                 var structured = ExtractStructuredProfile(html);
+                var title = ExtractTitle(html);
 
                 // Yapılandırılmış veri VARSA düz metin kısa kalsa bile sayfa işe yarar: dizin
                 // profillerinin değerli kısmı zaten JSON-LD'de duruyor.
                 return text.Length < 80 && structured is null
                     ? new FetchedPage(current.ToString(), false, null, "too_little_text")
-                    : new FetchedPage(current.ToString(), true, text, null, structured, keepHtml ? html : null);
+                    : new FetchedPage(current.ToString(), true, text, null, structured, keepHtml ? html : null, title);
             }
 
             return new FetchedPage(url, false, null, "too_many_redirects");
@@ -351,6 +356,36 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return metaParts.Count > 0
             ? string.Join(" · ", metaParts.Distinct()) + "\n\n" + body
             : body;
+    }
+
+    private static readonly Regex TitleTagRegex =
+        new(@"<title[^>]*>(.*?)</title>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+
+    /// <summary>Sayfanın başlığı: og:title (paylaşım için yazılmış, daha temiz), yoksa &lt;title&gt;. Yoksa null.</summary>
+    public static string? ExtractTitle(string? html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return null;
+
+        foreach (Match tag in MetaTagRegex.Matches(html))
+        {
+            string? key = null, content = null;
+            foreach (Match attr in AttrRegex.Matches(tag.Value))
+            {
+                var value = attr.Groups["v"].Value;
+                switch (attr.Groups[1].Value.ToLowerInvariant())
+                {
+                    case "name" or "property": key = value.ToLowerInvariant(); break;
+                    case "content": content = value; break;
+                }
+            }
+            if (key == "og:title" && !string.IsNullOrWhiteSpace(content))
+                return Normalize(WebUtility.HtmlDecode(content)).Replace('\n', ' ');
+        }
+
+        var match = TitleTagRegex.Match(html);
+        if (!match.Success) return null;
+        var title = Normalize(WebUtility.HtmlDecode(match.Groups[1].Value)).Replace('\n', ' ');
+        return title.Length > 0 ? title : null;
     }
 
     // ── JSON-LD → mesleki profil özeti ────────────────────────────────────────
