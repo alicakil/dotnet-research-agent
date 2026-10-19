@@ -211,6 +211,16 @@ public sealed class CompositeWebPageFetcher(
         return viaRender.Success ? viaRender : page;
     }
 
+    /// <summary>
+    /// Ham HTML yalnız düz çekimden gelir (render eden kol HTML vermez): yapılandırılmış veriye bakan kural için
+    /// (VIT-1223). Bu turda ulaşılamadığı kanıtlanmış host yine elenir; ölü işaretini yalnız <see cref="FetchAsync"/> koyar
+    /// (render eden kolu da denedikten sonra).
+    /// </summary>
+    public Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) =>
+        _deadHosts.Contains(HostOf(url))
+            ? Task.FromResult(new FetchedPage(url, false, null, "host_unreachable"))
+            : primary.FetchHtmlAsync(url, ct);
+
     private static bool IsUnreachable(FetchedPage page) =>
         !page.Success && page.SkipReason is { } r && UnreachableReasons.Contains(r);
 

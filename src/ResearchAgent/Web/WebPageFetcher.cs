@@ -26,6 +26,13 @@ public sealed record FetchedPage(
 public interface IWebPageFetcher
 {
     Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default);
+
+    /// <summary>
+    /// <see cref="FetchAsync"/> ile aynı; sonuçta ham HTML de döner (<see cref="FetchedPage.Html"/>): sayfanın yapılandırılmış
+    /// verisine bakan kurallar için (dizin profilinin şehri, VIT-1223). HTML veremeyen çekici (render eden kol, testlerin
+    /// taklitleri) düz çekimi döner; HTML'e bakan kural o zaman hiçbir şey çıkarmaz.
+    /// </summary>
+    Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) => FetchAsync(url, ct);
 }
 
 /// <summary>
