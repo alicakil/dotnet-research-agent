@@ -33,6 +33,24 @@ public interface IWebSearchProvider
 {
     bool IsConfigured { get; }
     Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default);
+
+    /// <summary>
+    /// Aramayı bir ülkenin Google'ından yapar (<paramref name="countryCode"/>, ISO-3166 alfa-2; null = ülkesiz). Kaydolan
+    /// uzmanın araması (VIT-1308): İrlanda'daki bir dermatolog İrlanda sonuçlarında öne çıkar. Ülke desteklemeyen sağlayıcı
+    /// ülkesiz arar.
+    /// </summary>
+    Task<WebSearchOutcome> SearchAsync(string query, int maxResults, string? countryCode, CancellationToken ct = default) =>
+        SearchAsync(query, maxResults, ct);
+}
+
+/// <summary>Arama servislerinin ülke parametresi (<c>gl</c>): iki harfli ülke kodu küçük harfle, değilse null.</summary>
+public static class WebSearchCountry
+{
+    public static string? Gl(string? countryCode)
+    {
+        var code = countryCode?.Trim();
+        return code is { Length: 2 } && code.All(char.IsAsciiLetter) ? code.ToLowerInvariant() : null;
+    }
 }
 
 /// <summary>
@@ -65,7 +83,10 @@ public sealed class SerperSearchProvider : IWebSearchProvider
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
 
-    public async Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default)
+    public Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default) =>
+        SearchAsync(query, maxResults, null, ct);
+
+    public async Task<WebSearchOutcome> SearchAsync(string query, int maxResults, string? countryCode, CancellationToken ct = default)
     {
         if (!IsConfigured || string.IsNullOrWhiteSpace(query))
             return WebSearchOutcome.Empty;
@@ -74,9 +95,9 @@ public sealed class SerperSearchProvider : IWebSearchProvider
         {
             using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint);
             request.Headers.TryAddWithoutValidation("X-API-KEY", _apiKey);
-            request.Content = new StringContent(
-                JsonSerializer.Serialize(new { q = query, num = Math.Clamp(maxResults, 1, 10) }),
-                Encoding.UTF8, "application/json");
+            var body = new Dictionary<string, object> { ["q"] = query, ["num"] = Math.Clamp(maxResults, 1, 10) };
+            if (WebSearchCountry.Gl(countryCode) is { } gl) body["gl"] = gl;
+            request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
             using var response = await _httpClient.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode)

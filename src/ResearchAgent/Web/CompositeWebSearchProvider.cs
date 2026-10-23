@@ -18,7 +18,11 @@ public sealed class CompositeWebSearchProvider(
 {
     public bool IsConfigured => providers.Any(p => p.IsConfigured);
 
-    public async Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default)
+    public Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default) =>
+        SearchAsync(query, maxResults, null, ct);
+
+    /// <summary>Ülke (<paramref name="countryCode"/>) her sağlayıcıya geçer; desteklemeyen ülkesiz arar.</summary>
+    public async Task<WebSearchOutcome> SearchAsync(string query, int maxResults, string? countryCode, CancellationToken ct = default)
     {
         var attempted = 0;
         var failures = new List<string>();
@@ -26,7 +30,7 @@ public sealed class CompositeWebSearchProvider(
         foreach (var provider in providers.Where(p => p.IsConfigured))
         {
             attempted++;
-            var outcome = await provider.SearchAsync(query, maxResults, ct);
+            var outcome = await provider.SearchAsync(query, maxResults, countryCode, ct);
 
             if (outcome.Failed)
             {

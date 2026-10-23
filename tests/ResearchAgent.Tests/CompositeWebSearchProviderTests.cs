@@ -95,6 +95,46 @@ public class CompositeWebSearchProviderTests
         Build(new StubProvider(false), new StubProvider(false)).IsConfigured.Should().BeFalse();
     }
 
+    [Fact]
+    public async Task SearchAsync_PassesTheCountryToEveryProvider()
+    {
+        var broken = new CountryStub(fails: true);
+        var backup = new CountryStub(fails: false);
+
+        await Build(broken, backup).SearchAsync("dermatologist Dublin", 5, "IE");
+
+        broken.Country.Should().Be("IE");
+        backup.Country.Should().Be("IE", "yedek sağlayıcı da aynı ülkeden aramalı (VIT-1308)");
+    }
+
+    [Fact]
+    public async Task SearchAsync_ProviderWithoutCountrySupportSearchesWithoutIt()
+    {
+        var plain = new StubProvider(configured: true, results: 2);
+
+        var outcome = await Build(plain).SearchAsync("dermatologist Dublin", 5, "IE");
+
+        outcome.Results.Should().HaveCount(2);
+        plain.Calls.Should().Be(1);
+    }
+
+    private sealed class CountryStub(bool fails) : IWebSearchProvider
+    {
+        public string? Country { get; private set; }
+        public bool IsConfigured => true;
+
+        public Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default) =>
+            SearchAsync(query, maxResults, null, ct);
+
+        public Task<WebSearchOutcome> SearchAsync(string query, int maxResults, string? countryCode, CancellationToken ct = default)
+        {
+            Country = countryCode;
+            return Task.FromResult(fails
+                ? WebSearchOutcome.Fail("HTTP 429")
+                : WebSearchOutcome.Ok([new WebSearchResult("t", "s", "https://example.ie/1")]));
+        }
+    }
+
     private sealed class StubProvider(bool configured, int results = 0, bool fails = false) : IWebSearchProvider
     {
         public int Calls { get; private set; }
