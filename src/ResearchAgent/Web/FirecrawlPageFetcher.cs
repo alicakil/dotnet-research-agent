@@ -145,7 +145,7 @@ public sealed class CompositeWebPageFetcher(
     /// </summary>
     private static readonly string[] PermanentSkips =
     [
-        "blocked_host", "blocked_host_after_redirect", "login_wall", "invalid_url", "empty_url",
+        "blocked_host", "blocked_host_after_redirect", "login_wall", "consent_wall", "invalid_url", "empty_url",
         "http_404", "http_410", "http_400", "http_401",
         // Alan adı yoksa (NXDOMAIN) ya da hedef özel ağdaysa render edecek bir sayfa da yok.
         "host_not_found", "private_address_blocked"

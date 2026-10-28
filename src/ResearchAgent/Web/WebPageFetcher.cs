@@ -18,6 +18,9 @@ namespace WebApi.Services.Ai;
 /// </summary>
 ///
 /// <see cref="Title"/> sayfanın başlığı (og:title, yoksa &lt;title&gt;): adı yazılmadan linkle açılan kliniğin adı buradan
+///
+/// <see cref="Url"/> çekimin vardığı adres. Onay duvarında (<c>consent_wall</c>) duvarın önündeki adrestir: Haritalar'ın kısa
+/// linki orada kartın adını taşıyan tam linke açılmıştır (VIT-1492).
 public sealed record FetchedPage(
     string Url, bool Success, string? Text, string? SkipReason, string? Structured = null, string? Html = null,
     string? Title = null);
@@ -85,6 +88,16 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private static bool IsLoginWall(Uri uri) =>
         LoginPaths.Any(p => uri.AbsolutePath.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Çerez onay duvarı (VIT-1492). Sunucu AB'de: Google Haritalar'ın her linki önce <c>consent.google.com</c>'a gidiyor ve o
+    /// sayfa da 200 + uzun gövde döndüğü için başarılı çekim gibi görünüyordu. 28 Eki 2026'da yalnız Haritalar linkiyle eklenen
+    /// bir kliniğin adı bu sayfanın başlığından yazıldı ("Bevor Sie zu Google Maps weitergehen"), araştırma o adla yapıldı.
+    /// Onay verilmez, sayfa okunamadı sayılır.
+    /// </summary>
+    private static bool IsConsentWall(Uri uri) =>
+        uri.Host.StartsWith("consent.google.", StringComparison.OrdinalIgnoreCase)
+        || uri.Host.Equals("consent.youtube.com", StringComparison.OrdinalIgnoreCase);
+
     public static bool IsLowYieldHost(string url) =>
         TryGetHost(url, out var host) && LowYieldHosts.Any(b => host == b || host.EndsWith("." + b));
 
@@ -132,6 +145,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         // ikisinde de içerik yok, sadece oturum açma formu var.
         if (IsLoginWall(uri))
             return new FetchedPage(url, false, null, "login_wall");
+        if (IsConsentWall(uri))
+            return new FetchedPage(url, false, null, "consent_wall");
 
         if (IsBlockedHost(url))
             return new FetchedPage(url, false, null, "blocked_host");
@@ -193,7 +208,10 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                 if ((int)response.StatusCode is >= 300 and < 400
                     && response.Headers.Location is { } location)
                 {
-                    current = location.IsAbsoluteUri ? location : new Uri(current, location);
+                    var next = location.IsAbsoluteUri ? location : new Uri(current, location);
+                    if (IsConsentWall(next))
+                        return new FetchedPage(current.AbsoluteUri, false, null, "consent_wall");
+                    current = next;
                     if (IsBlockedHost(current.ToString()))
                         return new FetchedPage(url, false, null, "blocked_host_after_redirect");
                     if (IsLoginWall(current))
