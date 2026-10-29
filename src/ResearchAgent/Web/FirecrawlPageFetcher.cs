@@ -168,13 +168,18 @@ public sealed class CompositeWebPageFetcher(
     /// </summary>
     private readonly HashSet<string> _deadHosts = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// <see cref="_seenBodies"/> ile <see cref="_deadHosts"/>'un kilidi: bir turun sayfaları aynı anda da okunuyor (uzman
+    /// </summary>
+    private readonly object _gate = new();
+
     /// <summary>Taşıma katmanı arızaları — sayfa yok değil, host'a ULAŞILAMIYOR.</summary>
     private static readonly string[] UnreachableReasons = ["timeout", "fetch_error", "dns_error"];
 
     public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
     {
         var host = HostOf(url);
-        if (_deadHosts.Contains(host))
+        if (IsDead(host))
             return new FetchedPage(url, false, null, "host_unreachable");
 
         var page = await primary.FetchAsync(url, ct);
@@ -217,16 +222,24 @@ public sealed class CompositeWebPageFetcher(
     /// (render eden kolu da denedikten sonra).
     /// </summary>
     public Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) =>
-        _deadHosts.Contains(HostOf(url))
+        IsDead(HostOf(url))
             ? Task.FromResult(new FetchedPage(url, false, null, "host_unreachable"))
             : primary.FetchHtmlAsync(url, ct);
 
     private static bool IsUnreachable(FetchedPage page) =>
         !page.Success && page.SkipReason is { } r && UnreachableReasons.Contains(r);
 
+    private bool IsDead(string host)
+    {
+        lock (_gate) return _deadHosts.Contains(host);
+    }
+
     private void MarkDead(string host, string url)
     {
-        if (host.Length == 0 || !_deadHosts.Add(host)) return;
+        lock (_gate)
+        {
+            if (host.Length == 0 || !_deadHosts.Add(host)) return;
+        }
         logger.LogInformation("Host ulaşılamıyor, bu turda kalan adresleri elenecek: {Host} ({Url})", host, url);
     }
 
@@ -243,13 +256,16 @@ public sealed class CompositeWebPageFetcher(
         if (string.IsNullOrEmpty(text)) return false;
 
         var host = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
-        if (!_seenBodies.TryGetValue(host, out var bodies))
-            _seenBodies[host] = bodies = new HashSet<string>(StringComparer.Ordinal);
 
         // Uzunluk + baş/son parçası: tam metni sözlükte tutmak, sayfa başına on binlerce
         // karakteri istek boyunca bellekte taşımak olurdu.
         var head = text.Length <= 200 ? text : text[..200];
         var tail = text.Length <= 200 ? string.Empty : text[^200..];
-        return !bodies.Add($"{text.Length}|{head}|{tail}");
+        lock (_gate)
+        {
+            if (!_seenBodies.TryGetValue(host, out var bodies))
+                _seenBodies[host] = bodies = new HashSet<string>(StringComparer.Ordinal);
+            return !bodies.Add($"{text.Length}|{head}|{tail}");
+        }
     }
 }
