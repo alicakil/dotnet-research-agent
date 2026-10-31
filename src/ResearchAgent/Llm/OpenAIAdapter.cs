@@ -6,7 +6,7 @@ using Microsoft.Extensions.Options;
 namespace WebApi.Services.Ai;
 
 /// <summary>
-/// OpenAI (Chat Completions) adapter'ı — go-live primary sağlayıcı (paid). Varsayılan model gpt-5-mini.
+/// OpenAI (Chat Completions) adapter'ı — go-live primary sağlayıcı (paid). Varsayılan model gpt-6-luna.
 /// Çıktı tavanı <c>max_completion_tokens</c> ile gider
 /// (GPT-5/o-serisi max_tokens kabul etmez). API anahtarı SSM→env (<c>Ai:OpenAI:ApiKey</c> / <c>OPENAI_API_KEY</c>).
 /// Key yoksa IsConfigured=false → AiRouter sağlayıcıyı atlar; politikada başka sağlayıcı olmadığı için çağrı hata verir.
@@ -47,8 +47,8 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         if (!IsConfigured)
             throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
-        // Politika modeli (varsa) tek-atış yolunda da geçerli — ör. derin araştırma sentezi
-        // gpt-5.6-terra ister, hızlı triyaj global gpt-5-mini'de kalır.
+        // Politika modeli (varsa) tek-atış yolunda da geçerli; yoksa sağlayıcı varsayılanı. Adapter'ı
+        // doğrudan çağıran servis modeli kendisi taşımalı (e-posta triyajı bunu unutmuştu, VIT-1132).
         var model = request.Model ?? _options.OpenAI.Model;
         var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);
 
@@ -78,8 +78,8 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             ["model"] = model,
             ["messages"] = messages,
             // Reasoning'i kıs → hızlı (25s timeout + prod 30s API-GW altında) + ucuz; grounded iş
-            // reasoning gerektirmez. Değer MODELE GÖRE: `minimal` yeni kuşakta 400 veriyor (bkz. helper).
-            ["reasoning_effort"] = request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(model),
+            // reasoning gerektirmez. Politika yazmadıysa `low`: `minimal` bugünkü modellerde 400 veriyor (bkz. helper).
+            ["reasoning_effort"] = request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(),
         };
         if (request.MaxOutputTokens is int maxTokens)
             body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
@@ -154,8 +154,8 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             // varsayılan. Araç varlığı değeri etkiler — yeni kuşak, tool'larla reasoning kabul
             // etmiyor (bkz. helper), o yüzden tool varken override yok sayılır.
             ["reasoning_effort"] = hasTools
-                ? AiAdapterHelpers.ResolveReasoningEffort(model, hasTools: true)
-                : request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(model),
+                ? AiAdapterHelpers.ResolveReasoningEffort(hasTools: true)
+                : request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(),
         };
         if (request.MaxOutputTokens is int maxTokens)
             body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL

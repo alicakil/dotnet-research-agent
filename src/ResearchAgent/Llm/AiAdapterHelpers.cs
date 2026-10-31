@@ -8,18 +8,19 @@ namespace WebApi.Services.Ai;
 internal static class AiAdapterHelpers
 {
     /// <summary>
-    /// Modele göre `reasoning_effort` değeri. SABİT DEĞER GÖNDERİLEMEZ: `minimal` yalnızca gpt-5 /
-    /// gpt-5-mini kuşağında geçerli; gpt-5.4+ ve gpt-5.6 (sol/terra/luna) onu reddeder —
+    /// Politika eforu yazmadığında gönderilen `reasoning_effort`. `minimal` GÖNDERİLEMEZ: yalnız gpt-5 /
+    /// gpt-5-mini kuşağında geçerliydi; gpt-5.4+, gpt-5.6 ve gpt-6 kuşağı (sol/terra/luna) onu reddeder —
     /// *"Unsupported value: 'reasoning_effort' does not support 'minimal' with this model.
-    /// Supported values are: 'none', 'low', 'medium', 'high', 'xhigh'"* → OpenAI **400**.
+    /// Supported values are: 'none', 'low', 'medium', 'high', 'xhigh'"* → OpenAI **400**. gpt-5 ve
+    /// gpt-5-mini 11 Aralık 2026'da kapandığı için onlara ayrılan `minimal` dalı kalktı (31 Eki 2026, VIT-1132).
     ///
     /// Yedek sağlayıcı varken bu SESSİZ bir arızaydı: router 400'ü fallback sanıp yedeğe düşüyor,
     /// yanıt geliyor, kimse fark etmiyordu — pinlenen pahalı model hiç kullanılmamış oluyordu.
     /// (Tam olarak bu yaşandı: gpt-5.6-terra pinlendiğinde her faturalama sohbeti yedeğin modeline
     /// düştü; eval yakaladı.) Bugün yedek yok: yanlış değer çağrıyı doğrudan düşürür.
     ///
-    /// Yeni kuşakta `low` seçiliyor, `none` değil: bir tık akıl yürütme yanıt kalitesine yarıyor,
-    /// `minimal`in amacı olan "hız + ucuzluk" ise `low` ile büyük ölçüde korunuyor.
+    /// `low` seçiliyor, `none` değil: bir tık akıl yürütme yanıt kalitesine yarıyor,
+    /// eski `minimal`in amacı olan "hız + ucuzluk" ise `low` ile büyük ölçüde korunuyor.
     ///
     /// TEK İSTİSNA — <paramref name="hasTools"/>: yeni kuşak, function tool'larla birlikte
     /// `/v1/chat/completions` üzerinde reasoning KABUL ETMİYOR:
@@ -28,15 +29,7 @@ internal static class AiAdapterHelpers
     /// to 'none'."* → tool-calling yolunda `none` gönderilir. (Alternatif `/v1/responses`'a
     /// taşınmaktı; ayrı bir API şeması demek — kazancı yokken yapılmadı.)
     /// </summary>
-    public static string ResolveReasoningEffort(string? model, bool hasTools = false)
-    {
-        // gpt-5 ve gpt-5-mini (2025 kuşağı) `minimal` destekler; 5.1+ / 5.4+ / 5.6 desteklemez.
-        var supportsMinimal = string.IsNullOrEmpty(model)
-            || model.StartsWith("gpt-5-", StringComparison.OrdinalIgnoreCase)
-            || model.Equals("gpt-5", StringComparison.OrdinalIgnoreCase);
-        if (supportsMinimal) return "minimal";
-        return hasTools ? "none" : "low";
-    }
+    public static string ResolveReasoningEffort(bool hasTools = false) => hasTools ? "none" : "low";
 
     /// <summary>
     /// Etkin sistem promptunu oluşturur. <see cref="AiCompletionRequest.ResponseJsonSchema"/> doluysa,
