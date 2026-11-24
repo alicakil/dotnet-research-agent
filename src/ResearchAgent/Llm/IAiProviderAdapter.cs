@@ -1,42 +1,39 @@
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// Tek bir LLM sağlayıcısına (OpenAI, Gemini, Bedrock-Claude...) adapte olan sözleşme.
-/// <see cref="AiRouter"/> bu adapter'ları model politikasına göre sırayla dener: birincil
-/// başarısız/kota-dolu olursa bir sonrakine düşer (fallback).
+/// Contract for one LLM provider (OpenAI, Gemini, ...). <see cref="AiRouter"/> tries adapters in
+/// policy order: when the primary fails or is out of quota it falls back to the next one.
 ///
-/// Her adapter, sonuçta token kullanımını (<see cref="AiUsage"/>) döndürmek ZORUNDADIR —
-/// tenant-başı metering ve maliyet hesabı buna dayanır.
+/// Every adapter must return the token use (<see cref="AiUsage"/>): metering and cost depend on it.
 /// </summary>
 public interface IAiProviderAdapter
 {
-    /// <summary>Bu adapter'ın temsil ettiği sağlayıcı.</summary>
     AiProvider Provider { get; }
 
     /// <summary>
-    /// Sağlayıcı şu an kullanılabilir mi (API anahtarı tanımlı mı vb.). Router, konfigüre
-    /// olmayan adapter'ları atlar — eksik anahtar tüm akışı düşürmez.
+    /// Whether the provider can be used right now (an API key is set, and so on). The router skips
+    /// adapters that are not configured, so one missing key does not bring the whole flow down.
     /// </summary>
     bool IsConfigured { get; }
 
     /// <summary>
-    /// Bu sağlayıcı <see cref="AiCompletionRequest.Images"/> okuyabiliyor mu. Varsayılan false:
-    /// görselli bir isteği görsel okuyamayan sağlayıcıya göndermek, görselleri sessizce düşürüp
-    /// "boş sayfa" cevabı üretmek demek olurdu — çağıran servisler bu bayrağa bakıp eler.
+    /// Whether this provider can read <see cref="AiCompletionRequest.Images"/>. Defaults to false:
+    /// sending a request with images to a provider that cannot read them would drop the images silently
+    /// and produce an "empty page" answer, so callers filter on this flag.
     /// </summary>
     bool SupportsImages => false;
 
     /// <summary>
-    /// İsteği bu sağlayıcıyla tamamlar. Hata, kota aşımı veya rate-limit durumunda exception
-    /// fırlatır; router bunu yakalayıp bir sonraki sağlayıcıya geçer.
+    /// Completes the request with this provider. Throws on an error, a quota or a rate limit; the router
+    /// catches it and moves on to the next provider.
     /// </summary>
     Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Tool-calling (function-calling) çok-turlu sohbet — agentic akış (support chatbot). Yalnızca
-    /// OpenAI-uyumlu sağlayıcılar (bugün OpenAI) implemente eder; diğerleri NotSupportedException fırlatır
-    /// (router uygun sağlayıcıyı seçer). Single-shot <see cref="CompleteAsync"/>'i etkilemez.
+    /// Multi-turn chat with tool calling (function calling), the agentic flow. Only OpenAI-compatible
+    /// providers implement it; others throw <see cref="NotSupportedException"/> and the caller picks a
+    /// provider that can. It does not affect the single-shot <see cref="CompleteAsync"/>.
     /// </summary>
     Task<AiChatResult> CompleteChatAsync(AiChatRequest request, CancellationToken cancellationToken = default)
-        => throw new NotSupportedException($"{Provider} tool-calling desteklemiyor (CompleteChatAsync).");
+        => throw new NotSupportedException($"{Provider} does not support tool calling (CompleteChatAsync).");
 }

@@ -1,21 +1,20 @@
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// Bir AI tamamlama isteğinin sonucu: üretilen metin + isteği gerçekte hangi sağlayıcı/model
-/// karşıladı + ne kadar token harcandı. Provider/Model alanları fallback nedeniyle istenen
-/// birincil sağlayıcıdan farklı olabilir; metering bu gerçekleşen değerleri kaydeder.
+/// Result of one completion: the text, the provider and model that really served it, and the tokens
+/// spent. Provider and model can differ from the primary of the policy after a fallback; metering
+/// records these real values.
 /// </summary>
 public sealed class AiCompletionResult
 {
-    /// <summary>Üretilen metin. <c>ResponseJsonSchema</c> verildiyse şemaya uygun JSON string.</summary>
+    /// <summary>The produced text; a JSON string matching the schema when <c>ResponseJsonSchema</c> was set.</summary>
     public required string Text { get; init; }
 
-    /// <summary>İsteği gerçekte karşılayan sağlayıcı (fallback sonrası değişmiş olabilir).</summary>
+    /// <summary>The provider that served the request (may differ from the primary after a fallback).</summary>
     public required AiProvider Provider { get; init; }
 
-    /// <summary>Kullanılan model adı (ör. "gemini-2.5-flash").</summary>
+    /// <summary>The model name used (for example "gemini-2.5-flash").</summary>
     public required string Model { get; init; }
 
-    /// <summary>Token kullanımı.</summary>
     public required AiUsage Usage { get; init; }
 }

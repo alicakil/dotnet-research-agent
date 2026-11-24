@@ -1,60 +1,50 @@
 using Microsoft.Extensions.Options;
-using Shared.Services;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// <see cref="IAiCompletionService"/> implementasyonu — Faz 0 router.
-/// Sorumluluk zinciri: kimlik (oturumdan) → kota guard → sağlayıcı seç + fallback → metering.
-/// Uygulama servisleri (MealPlanService vb.) yalnızca bunu enjekte eder; sağlayıcıyı bilmezler.
+/// <see cref="IAiCompletionService"/> implementation. Chain of responsibility for every call:
+/// identity (from the ambient context) → quota guard → provider choice with fallback → metering.
+/// Application services inject only this; they never know which provider answered.
 /// </summary>
 public sealed class AiRouter : IAiCompletionService
 {
     private readonly IEnumerable<IAiProviderAdapter> _adapters;
     private readonly AiOptions _options;
-    private readonly TenantResolver _tenantResolver;
-    private readonly IAiCreditService _creditService;
+    private readonly IAiUsageMeter _meter;
     private readonly AiTraceContext _traceContext;
     private readonly ILogger<AiRouter> _logger;
 
     public AiRouter(
         IEnumerable<IAiProviderAdapter> adapters,
         IOptions<AiOptions> options,
-        TenantResolver tenantResolver,
-        IAiCreditService creditService,
+        IAiUsageMeter meter,
         AiTraceContext traceContext,
         ILogger<AiRouter> logger)
     {
         _adapters = adapters;
         _options = options.Value;
-        _tenantResolver = tenantResolver;
-        _creditService = creditService;
+        _meter = meter;
         _traceContext = traceContext;
         _logger = logger;
     }
 
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
-        // 1. Kimlik — GÜVENLİK: oturumdan (JWT/TenantResolver), istekten/prompt'tan DEĞİL.
-        var tenant = _tenantResolver.GetCurrentTenant()
-            ?? throw new InvalidOperationException("AI çağrısı için tenant context bulunamadı.");
-        var tenantId = tenant.TenantId;
-        var userId = _tenantResolver.GetUserId();
-
-        // İzlenebilirlik: kimliği ambient bağlama koy (oturumdan; anonim payload'a dokunmadan). ClientId/ContextKey
-        // varsa çağıran endpoint önceden set etmiştir — üzerine yazma. Fallback denemeleri aynı correlation'ı paylaşır.
-        _traceContext.TenantId = tenantId;
-        _traceContext.UserId = userId;
+        // 1. Identity comes from the ambient context that the host filled from its session; never
+        //    from the request or the prompt. Fallback attempts share one correlation id.
+        var scopeId = _traceContext.ScopeId;
+        var userId = _traceContext.UserId;
         _traceContext.BeginOperation();
 
         var policy = _options.GetPolicy(request.TaskType);
 
-        // 2. Kota guard — yetersizse AiQuotaExceededException (her tenant'ta zorunlu, test/demo dâhil).
-        await _creditService.EnsureCanSpendAsync(tenantId, policy.CreditCost, cancellationToken);
+        // 2. Quota guard: the meter throws AiQuotaExceededException when the scope cannot pay.
+        await _meter.EnsureCanSpendAsync(scopeId, policy.Cost, cancellationToken);
 
-        // Politikayı isteğe uygula (istek kendi değerini vermişse o kazanır).
-        // GÖRSELLER burada AYNEN taşınır: düşürülürlerse model boş bir sayfayı okumuş gibi cevap
-        // verir ve bu, fark edilmeyen türden bir hata olurdu (bkz. AiCompletionRequest.Images).
+        // The policy fills what the request left open; a value on the request wins.
+        // Images are carried over as they are: dropping them would make the model answer as if it
+        // had read an empty page, the kind of failure nobody notices.
         var effectiveRequest = new AiCompletionRequest
         {
             TaskType = request.TaskType,
@@ -67,20 +57,19 @@ public sealed class AiRouter : IAiCompletionService
             ReasoningEffort = request.ReasoningEffort ?? policy.ReasoningEffort,
         };
 
-        // Görselli istek yalnız görsel OKUYABİLEN sağlayıcıya gidebilir; diğerleri zincirden elenir
+        // A request with images may only go to a provider that can read them; the others leave the chain.
         var needsVision = request.Images is { Count: > 0 };
         if (needsVision && !policy.Providers.Any(pv => _adapters.Any(a => a.Provider == pv && a.IsConfigured && a.SupportsImages)))
-            throw new AiCompletionFailedException(
-                "Görsel okuyabilen bir AI sağlayıcı yapılandırılmamış; görselli istek işlenemiyor.");
+            throw new AiCompletionFailedException("No configured provider can read images; the request cannot be served.");
 
-        // 3. Sağlayıcı sırası + fallback (politikadaki sıraya göre).
+        // 3. Providers in policy order, with fallback.
         Exception? lastError = null;
         foreach (var providerType in policy.Providers)
         {
             var adapter = _adapters.FirstOrDefault(a => a.Provider == providerType && a.IsConfigured && (!needsVision || a.SupportsImages));
             if (adapter is null)
             {
-                _logger.LogDebug("AI sağlayıcı {Provider} atlandı (kayıtlı değil veya API anahtarı yok).", providerType);
+                _logger.LogDebug("AI provider {Provider} skipped (not registered or no API key).", providerType);
                 continue;
             }
 
@@ -88,34 +77,34 @@ public sealed class AiRouter : IAiCompletionService
             {
                 var result = await adapter.CompleteAsync(effectiveRequest, cancellationToken);
 
-                // 4. Metering — krediyi düş + ledger'a başarı satırı yaz.
-                await _creditService.RecordSuccessAsync(tenantId, userId, request.TaskType, result, policy.CreditCost, cancellationToken: cancellationToken);
+                // 4. Metering: charge the scope and write a success row.
+                await _meter.RecordSuccessAsync(scopeId, userId, request.TaskType, result, policy.Cost, cancellationToken);
 
                 _logger.LogInformation(
-                    "AI tamamlandı: tenant={TenantId}, task={Task}, provider={Provider}, in={In}, out={Out}, kredi={Credit}",
-                    tenantId, request.TaskType, result.Provider, result.Usage.InputTokens, result.Usage.OutputTokens, policy.CreditCost);
+                    "AI call done: scope={Scope}, task={Task}, provider={Provider}, in={In}, out={Out}, cost={Cost}",
+                    scopeId, request.TaskType, result.Provider, result.Usage.InputTokens, result.Usage.OutputTokens, policy.Cost);
 
                 return result;
             }
             catch (Exception ex)
             {
                 lastError = ex;
-                _logger.LogWarning(ex, "AI sağlayıcı {Provider} başarısız; fallback deneniyor.", providerType);
+                _logger.LogWarning(ex, "AI provider {Provider} failed; trying the next one.", providerType);
             }
         }
 
-        // 5. Hepsi başarısız → kredi DÜŞÜLMEZ, ledger'a hata satırı yaz, DOSTÇA hata fırlat (kullanıcıya gider).
-        await _creditService.RecordFailureAsync(tenantId, userId, request.TaskType, lastError?.Message, cancellationToken);
+        // 5. All failed: nothing is charged, a failure row is written, and the caller gets a friendly error.
+        await _meter.RecordFailureAsync(scopeId, userId, request.TaskType, lastError?.Message, cancellationToken);
 
         var errText = lastError?.Message ?? string.Empty;
         var isRateLimited = errText.Contains("429") || errText.Contains("rate_limit", StringComparison.OrdinalIgnoreCase);
         var isDailyQuota = errText.Contains("per day", StringComparison.OrdinalIgnoreCase) || errText.Contains("(TPD)", StringComparison.OrdinalIgnoreCase);
         throw new AiCompletionFailedException(
             isDailyQuota
-                ? "AI servisinin günlük ücretsiz kotası doldu; yarın yenilenir. (Daha fazlası için kredi paketleri yakında.)"
+                ? "The AI provider's daily quota is used up; it renews tomorrow."
                 : isRateLimited
-                    ? "AI servisi şu an çok yoğun (dakikalık hız sınırı). Lütfen birkaç saniye sonra tekrar deneyin."
-                    : "AI servisi geçici olarak kullanılamıyor. Lütfen biraz sonra tekrar deneyin.",
+                    ? "The AI provider is busy right now (rate limit). Please try again in a few seconds."
+                    : "The AI service is temporarily unavailable. Please try again shortly.",
             lastError);
     }
 }

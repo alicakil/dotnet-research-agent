@@ -1,16 +1,15 @@
 using System.Diagnostics;
 using System.Text.Json;
-using DAL.Entites;
 using Microsoft.Extensions.Options;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// MERKEZİ AI izlenebilirlik: her <see cref="IAiProviderAdapter"/>'ı sarar. Üç çağrı yolu da
-/// (AiRouter single-shot · AiAgentRunner tool-loop · doğrudan-adapter EmailTriage/Invoice) eninde
-/// sonunda bir adapter'a indiği için, TEK yer = tam kapsama; gelecekteki her yeni AI özelliği de
-/// otomatik kapsanır. Modele giden/gelen ham metni + <see cref="AiTraceContext"/>'ten kimliği
-/// (ANONİM payload'a dokunmadan) <see cref="AiTraceEntity"/>'ye yazar. Fallback: HER deneme ayrı satır.
+/// Decorator around every provider adapter: it records each real provider call, including failed
+/// fallback attempts, as one <see cref="AiTraceRecord"/> with the exact prompts, the response, tokens,
+/// cost and latency. Identity columns come from <see cref="AiTraceContext"/>, never from the payload.
+/// Recording never breaks the call: the recorder is fail-safe and a failure is re-thrown unchanged so
+/// the router's fallback keeps working.
 /// </summary>
 public sealed class TracingAiProviderAdapter : IAiProviderAdapter
 {
@@ -29,32 +28,33 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
     }
 
     public AiProvider Provider => _inner.Provider;
+
     public bool IsConfigured => _inner.IsConfigured;
 
     // Every capability flag has to be forwarded, not inherited: this decorator wraps every adapter,
     // so an un-forwarded member silently reports the interface DEFAULT for the whole fleet. That is
-    // what happened with images — callers filter on SupportsImages, the decorator answered false for
-    // OpenAI too, and screenshot capture failed instantly with "no capable provider".
+    // what happened with images: callers filter on SupportsImages, the decorator answered false for
+    // OpenAI too, and screenshot reading failed instantly with "no capable provider".
     public bool SupportsImages => _inner.SupportsImages;
 
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
         var sw = Stopwatch.StartNew();
-        var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);   // modele giden BİREBİR sistem metni
+        var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);   // the exact system text the model receives
         try
         {
             var result = await _inner.CompleteAsync(request, cancellationToken);
             sw.Stop();
             await SafeRecord(NewTrace(request.TaskType, systemText, request.UserPrompt)
-                .WithSuccess(result, sw.ElapsedMilliseconds, ComputeCost(result)), request.TaskType, cancellationToken);
+                .WithSuccess(result, sw.ElapsedMilliseconds, ComputeCost(result)), request.TaskType);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
             await SafeRecord(NewTrace(request.TaskType, systemText, request.UserPrompt)
-                .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType, cancellationToken);
-            throw;   // router fallback'i sürsün
+                .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType);
+            throw;   // let the router fall back
         }
     }
 
@@ -62,7 +62,7 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
     {
         var sw = Stopwatch.StartNew();
         var systemText = request.Messages.FirstOrDefault(m => m.Role == "system")?.Content;
-        var conversation = JsonSerializer.Serialize(request.Messages);   // tam çok-turlu bağlam
+        var conversation = JsonSerializer.Serialize(request.Messages);   // the full multi-turn context
         try
         {
             var result = await _inner.CompleteChatAsync(request, cancellationToken);
@@ -78,14 +78,14 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
             trace.CostUsd = _options.ComputeCostUsd(result.Provider, result.Model, result.Usage);
             trace.LatencyMs = (int)sw.ElapsedMilliseconds;
             trace.Success = true;
-            await SafeRecord(trace, request.TaskType, cancellationToken);
+            await SafeRecord(trace, request.TaskType);
             return result;
         }
         catch (Exception ex)
         {
             sw.Stop();
             await SafeRecord(NewTrace(request.TaskType, systemText, conversation)
-                .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType, cancellationToken);
+                .WithFailure(ex, sw.ElapsedMilliseconds), request.TaskType);
             throw;
         }
     }
@@ -93,44 +93,45 @@ public sealed class TracingAiProviderAdapter : IAiProviderAdapter
     private decimal ComputeCost(AiCompletionResult result) =>
         _options.ComputeCostUsd(result.Provider, result.Model, result.Usage);
 
-    /// <summary>Kimlik sütunlarını ambient bağlamdan doldurulmuş taze bir trace iskeleti.</summary>
-    private AiTraceEntity NewTrace(AiTaskType taskType, string? systemPrompt, string? userPrompt) => new()
+    private AiTraceRecord NewTrace(string taskType, string? systemPrompt, string? userPrompt) => new()
     {
         CorrelationId = _context.CorrelationId ?? Guid.NewGuid(),
-        TenantId = _context.TenantId,
+        ScopeId = _context.ScopeId,
         UserId = _context.UserId,
-        ClientId = _context.ClientId,
-        ContextKey = _context.ContextKey,
         ConversationId = _context.ConversationId,
         Surface = _context.Surface,
-        DeviceId = _context.DeviceId,
-        SessionId = _context.SessionId,
-        TaskType = taskType.ToString(),
-        Provider = _inner.Provider.ToString(),   // fallback denemesi başarısız olsa bile hangi sağlayıcı
+        Properties = _context.Properties.Count > 0 ? new Dictionary<string, string>(_context.Properties) : null,
+        TaskType = taskType,
+        Provider = _inner.Provider.ToString(),   // which provider, even when a fallback attempt failed
         SystemPrompt = systemPrompt,
         UserPrompt = userPrompt,
-        CreatedBy = _context.UserId?.ToString() ?? "system",
     };
 
-    private async Task SafeRecord(AiTraceEntity trace, AiTaskType taskType, CancellationToken cancellationToken)
+    private async Task SafeRecord(AiTraceRecord trace, string taskType)
     {
-        // Kişisel sağlık metni taşıyan işlerde giden metin ve yanıt ize yazılmaz: iz tablosu 180 gün saklanır ve admin
-        // asistanı okur. Sistem istemi (sabit metin), süre, token, maliyet ve hata yine yazılır.
-        if (!AiTaskTaxonomy.TracesContent(taskType))
+        // Tasks that carry personal text keep only the fixed system prompt, timing, tokens, cost and
+        // errors: the user prompt and the response stay out of the trace store.
+        if (!_options.GetPolicy(taskType).TraceContent)
         {
             trace.UserPrompt = null;
             trace.ResponseText = null;
         }
 
-        // Recorder zaten fail-safe; yine de trace yazımı istek iptalinden etkilenmesin (CancellationToken.None).
-        await _recorder.RecordAsync(trace, CancellationToken.None);
+        try
+        {
+            // Never tied to the request's cancellation: a cancelled call still deserves its row.
+            await _recorder.RecordAsync(trace, CancellationToken.None);
+        }
+        catch
+        {
+            // A trace store outage must not break AI calls.
+        }
     }
 }
 
-/// <summary>Trace iskeletini sonuçla doldurma yardımcıları (okunabilirlik).</summary>
-internal static class AiTraceEntityExtensions
+internal static class AiTraceRecordExtensions
 {
-    public static AiTraceEntity WithSuccess(this AiTraceEntity trace, AiCompletionResult result, long latencyMs, decimal costUsd)
+    public static AiTraceRecord WithSuccess(this AiTraceRecord trace, AiCompletionResult result, long latencyMs, decimal costUsd)
     {
         trace.Provider = result.Provider.ToString();
         trace.Model = result.Model;
@@ -144,7 +145,7 @@ internal static class AiTraceEntityExtensions
         return trace;
     }
 
-    public static AiTraceEntity WithFailure(this AiTraceEntity trace, Exception ex, long latencyMs)
+    public static AiTraceRecord WithFailure(this AiTraceRecord trace, Exception ex, long latencyMs)
     {
         trace.LatencyMs = (int)latencyMs;
         trace.Success = false;

@@ -1,62 +1,52 @@
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// Sağlayıcıdan bağımsız tek bir AI tamamlama isteği.
+/// One provider-independent completion request.
 ///
-/// GÜVENLİK: Kimlik (tenant / user / rol) BURADA YOKTUR. Kimlik, çağrı sırasında oturumdan
-/// (TenantResolver, JWT) alınır — asla çağıran tarafından veya prompt içinden verilmez.
-/// Bu yüzden bir tenant başka bir tenant'ın verisini "isteyemez": model "ne" üreteceğini söyler,
-/// "kim" olduğunu belirleyemez. Grounding verisi (örn. o tenant'a ait tarifler) çağıran servis
-/// tarafından önceden, yetkili biçimde çekilip <see cref="SystemPrompt"/> / <see cref="UserPrompt"/>
-/// içine konur.
+/// SECURITY: identity (scope, user, role) is NOT here. It is taken from the session at call time,
+/// never from the caller's data or from the prompt, so one tenant cannot "ask for" another tenant's
+/// data: the model decides "what" to produce, never "who" is asking. Grounding data (for example a
+/// tenant's own records) is fetched beforehand by the calling service, with its own authorization,
+/// and placed into <see cref="SystemPrompt"/> or <see cref="UserPrompt"/>.
 /// </summary>
 public sealed class AiCompletionRequest
 {
-    /// <summary>İş türü — model politikasını ve kredi maliyetini belirler.</summary>
-    public required AiTaskType TaskType { get; init; }
+    /// <summary>Task name ("research.plan", "support.chat"...). It selects the policy: models, limits, cost.</summary>
+    public required string TaskType { get; init; }
 
-    /// <summary>Sistem talimatı: rol, kurallar ve grounding context (önceden çekilmiş veri) buraya konur.</summary>
+    /// <summary>System instruction: role, rules and grounding context (data fetched beforehand).</summary>
     public string? SystemPrompt { get; init; }
 
-    /// <summary>Kullanıcı/görev istemi.</summary>
+    /// <summary>The user's or the task's prompt.</summary>
     public required string UserPrompt { get; init; }
 
     /// <summary>
-    /// Görsel girdiler (data URI: <c>data:image/jpeg;base64,…</c>). Dolu olduğunda istek yalnızca
-    /// GÖRÜNTÜ OKUYABİLEN bir sağlayıcıya gidebilir — bugün OpenAI. Diğer adapter'lar
-    /// <see cref="IAiProviderAdapter.SupportsImages"/> ile kendilerini eler; fallback zinciri onları
-    /// atlar, çünkü görselleri sessizce düşürüp metin göndermek "boş sayfa okumuş" bir cevap üretir
-    /// ve bu, hatanın fark edilmediği en kötü türü olurdu.
-    ///
-    /// bu yüzden ekranın kendisi kanıt kaynağı oluyor.
+    /// Image inputs as data URIs (<c>data:image/jpeg;base64,…</c>). When set, the request may only go to
+    /// a provider that can read images. Other adapters opt out through
+    /// <see cref="IAiProviderAdapter.SupportsImages"/> and the fallback chain skips them: dropping the
+    /// images silently and sending the text alone would produce an answer about an empty page, the
+    /// worst kind of failure because nobody notices it.
     /// </summary>
     public IReadOnlyList<string>? Images { get; init; }
 
     /// <summary>
-    /// Doluysa, sağlayıcıdan bu JSON şemasına uygun structured output istenir
-    /// (örn. meal plan = recipe-id + porsiyon listesi). Boşsa serbest metin döner.
-    /// Şemaya uyma garantisi sağlayıcıdan sağlayıcıya değişir; adapter en iyi çabayı gösterir,
-    /// çıktıyı çağıran servis yine de doğrular.
+    /// When set, the provider is asked for structured output that matches this JSON schema; otherwise
+    /// free text comes back. How strictly a provider follows the schema varies, so adapters do their
+    /// best and the calling service still validates the output.
     /// </summary>
     public string? ResponseJsonSchema { get; init; }
 
-    /// <summary>
-    /// Akıl yürütme seviyesi override'ı — politika belirler, adapter uygular. Null = model
-    /// varsayılanı. Yalnız OpenAI adapter'ı dikkate alır.
-    /// </summary>
+    /// <summary>Reasoning effort override: the policy decides, the adapter applies it. Null = model default. Only OpenAI reads it.</summary>
     public string? ReasoningEffort { get; init; }
 
-    /// <summary>Maksimum çıktı token'ı (maliyet tavanı). Null = sağlayıcı/politika varsayılanı.</summary>
+    /// <summary>Maximum output tokens (a cost ceiling). Null = provider or policy default.</summary>
     public int? MaxOutputTokens { get; init; }
 
     /// <summary>
-    /// Model override — dolu ise sağlayıcının global varsayılanı yerine bu model kullanılır
-    /// (ör. derin araştırma sentezi → gpt-5.6-terra). Çağıran servis genelde
-    /// <c>policy.Model</c>'i buraya geçirir; boşsa sağlayıcı ayarındaki model kullanılır.
-    ///
-    /// NOT: yalnızca OpenAI adapter'ı dikkate alır — model adları sağlayıcıya özgüdür.
-    /// Başka bir sağlayıcıya (Gemini) düşüldüğünde o sağlayıcı KENDİ yapılandırılmış modelini
-    /// kullanır; bu kasıtlı, aksi halde tanımadığı model adıyla 400 alırdı.
+    /// Model override: when set it replaces the provider's configured default. Callers usually pass
+    /// <c>policy.Model</c> here. Only the OpenAI adapter reads it, because model names are provider
+    /// specific: after a fallback to another provider that provider uses its own configured model on
+    /// purpose, otherwise it would answer 400 to a model name it does not know.
     /// </summary>
     public string? Model { get; init; }
 }

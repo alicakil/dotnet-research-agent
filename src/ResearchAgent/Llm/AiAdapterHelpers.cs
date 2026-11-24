@@ -2,39 +2,41 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
-/// <summary>Sağlayıcı adapter'ları arasında paylaşılan küçük yardımcılar (kod tekrarını önler).</summary>
+/// <summary>Small helpers shared between the provider adapters (avoids duplicated code).</summary>
 internal static class AiAdapterHelpers
 {
     /// <summary>
-    /// Politika eforu yazmadığında gönderilen `reasoning_effort`. `minimal` GÖNDERİLEMEZ: yalnız gpt-5 /
-    /// gpt-5-mini kuşağında geçerliydi; gpt-5.4+, gpt-5.6 ve gpt-6 kuşağı (sol/terra/luna) onu reddeder —
+    /// The `reasoning_effort` sent when the policy does not specify one. `minimal` CANNOT be sent: it was
+    /// valid only for the gpt-5 / gpt-5-mini generation; the gpt-5.4+, gpt-5.6 and gpt-6 generations
+    /// (sol/terra/luna) reject it —
     /// *"Unsupported value: 'reasoning_effort' does not support 'minimal' with this model.
-    /// Supported values are: 'none', 'low', 'medium', 'high', 'xhigh'"* → OpenAI **400**. gpt-5 ve
-    /// gpt-5-mini 11 Aralık 2026'da kapandığı için onlara ayrılan `minimal` dalı kalktı (31 Eki 2026, VIT-1132).
+    /// Supported values are: 'none', 'low', 'medium', 'high', 'xhigh'"* → OpenAI **400**. gpt-5 and
+    /// gpt-5-mini are retired on 11 Dec 2026, so the `minimal` branch reserved for them was removed.
     ///
-    /// Yedek sağlayıcı varken bu SESSİZ bir arızaydı: router 400'ü fallback sanıp yedeğe düşüyor,
-    /// yanıt geliyor, kimse fark etmiyordu — pinlenen pahalı model hiç kullanılmamış oluyordu.
-    /// (Tam olarak bu yaşandı: gpt-5.6-terra pinlendiğinde her faturalama sohbeti yedeğin modeline
-    /// düştü; eval yakaladı.) Bugün yedek yok: yanlış değer çağrıyı doğrudan düşürür.
+    /// With a fallback provider configured this was a SILENT failure: the router took the 400 for a reason
+    /// to fall back, the fallback answered, and nobody noticed — the pinned expensive model was never
+    /// actually used. (This exact thing happened: when gpt-5.6-terra was pinned, every chat fell through
+    /// to the fallback's model; an eval caught it.) Without a fallback provider a wrong value fails the
+    /// call outright.
     ///
-    /// `low` seçiliyor, `none` değil: bir tık akıl yürütme yanıt kalitesine yarıyor,
-    /// eski `minimal`in amacı olan "hız + ucuzluk" ise `low` ile büyük ölçüde korunuyor.
+    /// `low` is chosen, not `none`: a little reasoning helps answer quality, and the "speed + low cost"
+    /// that the old `minimal` was meant for is largely kept with `low`.
     ///
-    /// TEK İSTİSNA — <paramref name="hasTools"/>: yeni kuşak, function tool'larla birlikte
-    /// `/v1/chat/completions` üzerinde reasoning KABUL ETMİYOR:
+    /// ONE EXCEPTION — <paramref name="hasTools"/>: the new generation does not accept reasoning together
+    /// with function tools on `/v1/chat/completions`:
     /// *"Function tools with reasoning_effort are not supported for gpt-5.6-terra in
     /// /v1/chat/completions. To use function tools, use /v1/responses or set reasoning_effort
-    /// to 'none'."* → tool-calling yolunda `none` gönderilir. (Alternatif `/v1/responses`'a
-    /// taşınmaktı; ayrı bir API şeması demek — kazancı yokken yapılmadı.)
+    /// to 'none'."* → the tool-calling path sends `none`. (The alternative, `/v1/responses`, is a separate
+    /// API schema; it is offered as an opt-in path instead, see <see cref="AiChatRequest.UseResponsesApi"/>.)
     /// </summary>
     public static string ResolveReasoningEffort(bool hasTools = false) => hasTools ? "none" : "low";
 
     /// <summary>
-    /// Etkin sistem promptunu oluşturur. <see cref="AiCompletionRequest.ResponseJsonSchema"/> doluysa,
-    /// sağlayıcıdan bağımsız olarak "yalnızca bu şemaya uygun JSON döndür" talimatını ekler — adapter
-    /// ayrıca sağlayıcının JSON modunu da açar. Şema yoksa sistem promptu olduğu gibi döner.
+    /// Builds the effective system prompt. When <see cref="AiCompletionRequest.ResponseJsonSchema"/> is set,
+    /// it appends the "return only JSON that matches this schema" instruction, whatever the provider; the
+    /// adapter also turns on the provider's JSON mode. Without a schema the system prompt is returned as is.
     /// </summary>
     public static string ComposeSystemPrompt(AiCompletionRequest request)
     {
@@ -44,18 +46,18 @@ internal static class AiAdapterHelpers
         var sb = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(request.SystemPrompt))
             sb.AppendLine(request.SystemPrompt).AppendLine();
-        sb.AppendLine("Yalnızca aşağıdaki JSON şemasına uygun, geçerli tek bir JSON nesnesiyle yanıt ver. Şema dışında hiçbir açıklama, metin veya markdown ekleme:");
+        sb.AppendLine("Respond with a single valid JSON object that matches the JSON schema below. Do not add any explanation, text or markdown outside the JSON:");
         sb.Append(request.ResponseJsonSchema);
         return sb.ToString();
     }
 
-    /// <summary>Hata loglarında ham gövdeyi kısaltır.</summary>
+    /// <summary>Shortens the raw response body in error logs.</summary>
     public static string Truncate(string value, int max = 500) =>
         value.Length <= max ? value : value[..max];
 
-    // ── Tool-calling (OpenAI-uyumlu) ortak yardımcıları ──
+    // ── Shared helpers for tool calling (OpenAI-compatible) ──
 
-    /// <summary><see cref="AiChatMessage"/> listesini OpenAI chat-completions mesaj dizisine çevirir.</summary>
+    /// <summary>Converts a list of <see cref="AiChatMessage"/> into an OpenAI chat-completions message array.</summary>
     public static List<object> BuildChatMessages(IReadOnlyList<AiChatMessage> messages)
     {
         var result = new List<object>(messages.Count);
@@ -81,7 +83,7 @@ internal static class AiAdapterHelpers
         return result;
     }
 
-    /// <summary>Araç tanımlarını OpenAI <c>tools</c> dizisine çevirir (parametre şeması JSON olarak gömülür).</summary>
+    /// <summary>Converts tool definitions into the OpenAI <c>tools</c> array (the parameter schema is embedded as JSON).</summary>
     public static List<object> BuildToolsArray(IReadOnlyList<AiToolDefinition> tools) =>
         tools.Select(t => (object)new
         {
@@ -94,13 +96,13 @@ internal static class AiAdapterHelpers
             },
         }).ToList();
 
-    /// <summary>OpenAI-uyumlu yanıtı ayrıştırır: final metin VEYA tool_calls + usage.</summary>
+    /// <summary>Parses an OpenAI-compatible response: the final text OR tool_calls, plus usage.</summary>
     public static AiChatResult ParseChatResult(string json, AiProvider provider, string model)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
         if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-            throw new HttpRequestException($"{provider} boş yanıt döndürdü: {Truncate(json)}");
+            throw new HttpRequestException($"{provider} returned an empty response: {Truncate(json)}");
 
         string? text = null;
         var toolCalls = new List<AiToolCall>();
@@ -134,9 +136,9 @@ internal static class AiAdapterHelpers
     }
 
     /// <summary>
-    /// OpenAI-uyumlu <c>usage</c> bloğu. Chat Completions: <c>prompt_tokens</c> +
+    /// The OpenAI-compatible <c>usage</c> block. Chat Completions: <c>prompt_tokens</c> +
     /// <c>prompt_tokens_details.cached_tokens</c>; Responses: <c>input_tokens</c> +
-    /// <c>input_tokens_details.cached_tokens</c>. Alan yoksa 0.
+    /// <c>input_tokens_details.cached_tokens</c>. A missing field counts as 0.
     /// </summary>
     public static AiUsage ParseUsage(JsonElement root, string inputProp, string outputProp, string detailsProp)
     {

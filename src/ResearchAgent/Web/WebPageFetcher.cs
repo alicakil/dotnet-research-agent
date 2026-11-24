@@ -3,84 +3,88 @@ using System.Net.Sockets;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Web;
 
 /// <summary>
-/// Tek bir sayfa çekme sonucu. <see cref="Text"/> doluysa kullanılabilir içerik var.
+/// The result of fetching one page. If <see cref="Text"/> is filled, there is usable content.
 ///
-/// <see cref="Structured"/> sayfanın JSON-LD'sinden süzülen mesleki profil özeti (varsa). Düz
-/// metinden AYRI tutuluyor çünkü kalitesi bambaşka: puan, yorum sayısı ve yorum metinleri orada
-/// etiketli duruyor — 29 bin karakterlik menü/footer gürültüsünün içinden çıkarılmasına gerek
-/// dolu; sıradan sitelerde boş ve bu normaldir.
+/// <see cref="Structured"/> is a profile summary extracted from the page's JSON-LD (if there is one). It is
+/// kept SEPARATE from the plain text because its quality is completely different: rating, review count and
+/// review texts are already labeled there, so they need not be dug out of 29,000 characters of menu/footer
+/// noise. It is filled on pages that publish profile data (typically directory profiles) and empty on
+/// ordinary sites, which is normal.
 ///
-/// <see cref="Html"/> sayfanın ham HTML'i (tavanlı); yalnız <see cref="WebPageFetcher.FetchHtmlAsync"/> doldurur (VIT-1082: dizin
-/// profilindeki fotoğrafların adresleri metinde değil, işaretlemede).
+/// <see cref="Html"/> is the page's raw HTML (capped); only <see cref="WebPageFetcher.FetchHtmlAsync"/> fills it
+/// (for example, the photo URLs on a directory profile are in the markup, not in the text).
+///
+/// <see cref="Title"/> is the page title (og:title, else &lt;title&gt;): the name of a subject that was added
+/// by link alone, without a typed name, is taken from here.
+///
+/// <see cref="Url"/> is the address the fetch ended up at. On a consent wall (<c>consent_wall</c>) it is the
+/// address in front of the wall: there, a Google Maps short link has already expanded to the full link that
+/// carries the name of the place.
 /// </summary>
-///
-/// <see cref="Title"/> sayfanın başlığı (og:title, yoksa &lt;title&gt;): adı yazılmadan linkle açılan kliniğin adı buradan
-///
-/// <see cref="Url"/> çekimin vardığı adres. Onay duvarında (<c>consent_wall</c>) duvarın önündeki adrestir: Haritalar'ın kısa
-/// linki orada kartın adını taşıyan tam linke açılmıştır (VIT-1492).
 public sealed record FetchedPage(
     string Url, bool Success, string? Text, string? SkipReason, string? Structured = null, string? Html = null,
     string? Title = null);
 
-/// <summary>Sayfa çekme seam'i — derin araştırma servisi buna bağlanır, testler stub verir (ağ yok).</summary>
+/// <summary>The page-fetching seam — the deep research service plugs into it, tests supply a stub (no network).</summary>
 public interface IWebPageFetcher
 {
     Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default);
 
     /// <summary>
-    /// <see cref="FetchAsync"/> ile aynı; sonuçta ham HTML de döner (<see cref="FetchedPage.Html"/>): sayfanın yapılandırılmış
-    /// verisine bakan kurallar için (dizin profilinin şehri, VIT-1223). HTML veremeyen çekici (render eden kol, testlerin
-    /// taklitleri) düz çekimi döner; HTML'e bakan kural o zaman hiçbir şey çıkarmaz.
+    /// Same as <see cref="FetchAsync"/>, but the result also carries the raw HTML (<see cref="FetchedPage.Html"/>): for rules
+    /// that look at a page's structured data (for example, the city on a directory profile). A fetcher that cannot supply
+    /// HTML (the rendering arm, test fakes) returns the plain fetch; a rule that looks at the HTML then extracts nothing.
     /// </summary>
     Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) => FetchAsync(url, ct);
 }
 
 /// <summary>
-/// Kullanıcının VERDİĞİ URL'leri sunucu tarafından güvenle çekip düz metne indirger
-/// (derin araştırma kanıt toplama katmanı). Tasarım kısıtları:
+/// Safely fetches the URLs it is GIVEN on the server side and reduces them to plain text (the
+/// evidence-gathering layer of deep research). Design constraints:
 ///
-///  • SSRF çekirdekte: yalnız http/https, DNS çözümü sonrası özel/loopback/link-local/CGNAT
-///    adresleri reddedilir, yönlendirmeler ELDE takip edilir ve her hop yeniden doğrulanır.
-///    denemek boşa gecikme, ayrıca ToS ihlali riski).
-///  • Bütçe: host başına timeout, indirme boyutu tavanı, metin karakteri tavanı.
+///  • SSRF protection at the core: http/https only; after DNS resolution, private/loopback/link-local/CGNAT
+///    addresses are rejected; redirects are followed BY HAND and every hop is re-validated.
+///  • Hosts behind a login wall (LinkedIn, Facebook, X) are not fetched at all: trying them is
+///    wasted delay and risks violating their terms of service.
+///  • Budget: a per-URL timeout, a download size cap and a text character cap.
 ///
-/// Hata TOLERANSLI: her başarısızlık <see cref="FetchedPage"/> içinde sebebiyle döner, exception
-/// fırlatmaz — derin araştırma katmanı fail etse bile A/B/C kararı ayakta kalmalı.
+/// Error TOLERANT: every failure comes back inside <see cref="FetchedPage"/> with its reason and never
+/// throws — the rest of the research must stay up even if page fetching fails.
 /// </summary>
 public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher> logger) : IWebPageFetcher
 {
-    // 5, çünkü zincir bazen bir TUR ile başlıyor: sunucu önce dil çerezini basıp aynı adrese
-    // yönlendiriyor (ASP.NET kültür çerezi), asıl alan adına ancak ondan sonra gidiyor
-    // (denticity.com → 302 / → 302 www.denticity.com.tr). 3 hop bu tür zincirlerde biterken
-    // yakalanıyordu. Çerezler tutuluyor (handler UseCookies) — yoksa tur sonsuza döner.
+    // 5, because a chain sometimes starts with a round trip to the same address: the server first sets a
+    // language cookie and redirects back (ASP.NET culture cookie), and only then goes to the real domain
+    // (example.com → 302 / → 302 www.example.co.uk). With 3 hops, chains like this ran out just before
+    // the end. Cookies are kept (UseCookies on the handler) — without them the round trip never ends.
     private const int MaxRedirects = 5;
     private const int MaxDownloadBytes = 1_500_000;
     private const int MaxTextChars = 8_000;
     private static readonly TimeSpan PerUrlTimeout = TimeSpan.FromSeconds(8);
 
-    /// <summary>Çekmeyi denemeyeceğimiz host'lar (login duvarı / aktif bot bloğu).</summary>
+    /// <summary>Hosts we will not try to fetch (login wall / active bot blocking).</summary>
     private static readonly string[] BlockedHosts =
     {
-        "linkedin.com", "lnkd.in",       // HTTP 999 — authwall, datacenter IP'leri ASN'de bloklu
-        "facebook.com", "fb.com",        // login duvarı
-        "x.com", "twitter.com",          // login duvarı
+        "linkedin.com", "lnkd.in",       // HTTP 999 — auth wall, datacenter IPs are blocked by ASN
+        "facebook.com", "fb.com",        // login wall
+        "x.com", "twitter.com",          // login wall
     };
 
-    /// <summary>İçerik verimi düşük ama denemeye değer host'lar (og etiketleri/bio çıkabilir).</summary>
+    /// <summary>Hosts with a low content yield that are still worth trying (og tags / a bio may come out).</summary>
     private static readonly string[] LowYieldHosts = { "instagram.com", "youtube.com", "tiktok.com" };
 
     public static bool IsBlockedHost(string url) =>
         TryGetHost(url, out var host) && BlockedHosts.Any(b => host == b || host.EndsWith("." + b));
 
     /// <summary>
-    /// Giriş duvarına yönlendiren yollar. Bunlar 200 döner ve gövdeleri 80 karakterden uzundur,
-    /// yani kontrol edilmezse BAŞARILI bir çekim gibi görünür — kanıt yığınına bir oturum açma
-    /// <c>/accounts/login/?next=…</c> adresine düştü ve o sayfa kanıt sayıldı. Model neyse ki
-    /// "içerik görülemedi" dedi, ama buna güvenmek zorunda kalmamalıyız: okunamayan bir kaynağı
-    /// okunmuş gibi sunmak, kanıt disiplinini temelden bozar.
+    /// Paths that lead to a login wall. They return 200 and their bodies are longer than 80 characters,
+    /// so unless they are checked they look like a SUCCESSFUL fetch — in one real run a link landed on
+    /// <c>/accounts/login/?next=…</c> and that page was counted as evidence. Luckily the model said "the
+    /// content could not be seen", but we must not have to rely on that: presenting an unreadable source
+    /// as if it had been read undermines evidence discipline at its root.
     /// </summary>
     private static readonly string[] LoginPaths =
         ["/accounts/login", "/login", "/signin", "/sign-in", "/auth/login", "/users/sign_in"];
@@ -89,10 +93,10 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         LoginPaths.Any(p => uri.AbsolutePath.StartsWith(p, StringComparison.OrdinalIgnoreCase));
 
     /// <summary>
-    /// Çerez onay duvarı (VIT-1492). Sunucu AB'de: Google Haritalar'ın her linki önce <c>consent.google.com</c>'a gidiyor ve o
-    /// sayfa da 200 + uzun gövde döndüğü için başarılı çekim gibi görünüyordu. 28 Eki 2026'da yalnız Haritalar linkiyle eklenen
-    /// bir kliniğin adı bu sayfanın başlığından yazıldı ("Bevor Sie zu Google Maps weitergehen"), araştırma o adla yapıldı.
-    /// Onay verilmez, sayfa okunamadı sayılır.
+    /// Cookie consent wall. The server runs in the EU: every Google Maps link goes to <c>consent.google.com</c> first, and
+    /// that page returns 200 + a long body, so it looked like a successful fetch. On 28 Oct 2026 a subject that was added
+    /// with only a Maps link was named after this page's title ("Bevor Sie zu Google Maps weitergehen"), and the research
+    /// ran under that name. Consent is never given; the page counts as unreadable.
     /// </summary>
     private static bool IsConsentWall(Uri uri) =>
         uri.Host.StartsWith("consent.google.", StringComparison.OrdinalIgnoreCase)
@@ -102,15 +106,15 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         TryGetHost(url, out var host) && LowYieldHosts.Any(b => host == b || host.EndsWith("." + b));
 
     /// <summary>
-    /// Kullanıcının yazdığı adresi çekilebilir bir URL'ye çevirir. Form alanına şema YAZILMAZ —
-    /// insanlar "sitem.com" yazar, "https://sitem.com" değil. Prod'da bu yüzden bir adayın kendi
-    /// sitesi (en değerli, kimliği sabit kanıt kaynağı) sessizce "invalid_url" ile atlanmıştı.
-    /// Şema varsa dokunulmaz; yoksa https varsayılır (http gerekiyorsa yönlendirme takip ediliyor).
+    /// Turns a user-typed address into a fetchable URL. People do not type the scheme into a form field —
+    /// they write "mysite.com", not "https://mysite.com". In production this made a subject's own website
+    /// (the most valuable evidence source, with a fixed identity) get silently skipped as "invalid_url".
+    /// A scheme that is present is left alone; otherwise https is assumed (if http is needed, the redirect is followed).
     ///
-    /// NOKTA ŞARTI kasıtlı: şemayı her girdiye eklemek "not-a-url" gibi çöpü de geçerli bir
-    /// mutlak URI yapar, sonra DNS çözülemeyince <c>private_address_blocked</c> ile reddedilir —
-    /// yani çöp girdi, SSRF girişimiyle AYNI sebep koduna düşer ve o kod anlamını yitirir.
-    /// Noktasız bir host adı zaten hiçbir zaman kamuya açık bir site değildir.
+    /// The DOT REQUIREMENT is deliberate: adding the scheme to every input would turn garbage such as
+    /// "not-a-url" into a valid absolute URI. It would then fail at DNS resolution with a misleading reason
+    /// code instead of "invalid_url" (originally <c>private_address_blocked</c>, the SAME code as a real SSRF
+    /// attempt, which made that code lose its meaning). A host name without a dot is never a public site anyway.
     /// </summary>
     public static string NormalizeUrl(string url)
     {
@@ -125,8 +129,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     public Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default) => FetchCoreAsync(url, keepHtml: false, ct);
 
     /// <summary>
-    /// <see cref="FetchAsync"/> ile aynı kurallar (SSRF, yönlendirme, tavan, giriş duvarı), sonuçta ham HTML de döner
-    /// (<see cref="FetchedPage.Html"/>): dizin profilindeki fotoğrafların adresi için (VIT-1082).
+    /// The same rules as <see cref="FetchAsync"/> (SSRF, redirects, caps, login wall), but the result also carries the raw
+    /// HTML (<see cref="FetchedPage.Html"/>): for example, to get the photo URLs on a directory profile.
     /// </summary>
     public Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) => FetchCoreAsync(url, keepHtml: true, ct);
 
@@ -141,8 +145,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
             || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
             return new FetchedPage(url, false, null, "invalid_url");
 
-        // Giriş sayfası hem başlangıçta verilebilir hem de yönlendirmeyle karşımıza çıkabilir;
-        // ikisinde de içerik yok, sadece oturum açma formu var.
+        // A login page can be given up front or turn up through a redirect; either way there is
+        // no content, only a sign-in form.
         if (IsLoginWall(uri))
             return new FetchedPage(url, false, null, "login_wall");
         if (IsConsentWall(uri))
@@ -153,15 +157,15 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
 
         var page = await AttemptAsync(url, uri, keepHtml, ct);
 
-        // HTTPS'İ OLMAYAN SİTE. Küçük işletme sitelerinde sık: 443 sessizce yutuluyor (RST bile
-        // dönmüyor, bağlantı asılı kalıyor), 80 çalışıyor ve oradan gerçek adrese yönlendiriyor.
-        // Tarayıcı bunu görmez, çünkü https başarısız olunca kendisi http'ye düşer — biz düşmüyorduk.
+        // A SITE WITHOUT HTTPS. Common among small business sites: port 443 is silently swallowed (not even
+        // an RST comes back, the connection just hangs), port 80 works and redirects to the real address.
+        // A browser never runs into this, because when https fails it falls back to http itself — we did not.
         //
-        // Ölçüldü (DENTICITY, 27 Ağu 2026): kayıtlı adres https://denticity.com. 443 zaman aşımına
-        // düşüyor, http://denticity.com ise 302 ile www.denticity.com.tr'ye gidiyor ve site orada.
+        // Measured (27 Aug 2026): the stored address was https://example.com. Port 443 times out, while
+        // http://example.com answers with a 302 to www.example.com.tr, where the site actually lives.
         //
-        // Yalnız TAŞIMA katmanı arızasında denenir: 404/403 gibi bir CEVAP geldiyse site https
-        // konuşuyor demektir, şemayı düşürmek yanlış olurdu.
+        // Only tried on a TRANSPORT-layer failure: if a RESPONSE such as 404/403 came back, the site does
+        // speak https, and dropping the scheme would be wrong.
         if (!page.Success
             && page.SkipReason is "timeout" or "fetch_error"
             && uri.Scheme == Uri.UriSchemeHttps
@@ -171,7 +175,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
             var viaHttp = await AttemptAsync(url, overHttp, keepHtml, ct);
             if (viaHttp.Success)
             {
-                logger.LogInformation("HTTPS yanıt vermedi, http'ye düşüldü: {Url}", url);
+                logger.LogInformation("HTTPS did not respond, fell back to http: {Url}", url);
                 return viaHttp;
             }
         }
@@ -180,8 +184,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     }
 
     /// <summary>
-    /// Tek bir şemayla çekme denemesi. Kendi zaman aşımı saatiyle çalışır: http'ye düşme
-    /// denemesinin, https'in tükettiği süreden arta kalanla değil, tam bütçeyle koşması gerekiyor.
+    /// A fetch attempt with a single scheme. It runs on its own timeout clock: the http fallback must get
+    /// the full budget, not whatever is left after https has used up its time.
     /// </summary>
     private async Task<FetchedPage> AttemptAsync(string url, Uri start, bool keepHtml, CancellationToken ct)
     {
@@ -197,9 +201,9 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                     return new FetchedPage(url, false, null, blockReason);
 
                 using var request = new HttpRequestMessage(HttpMethod.Get, current);
-                // Bazı siteler UA'sız isteklere 403 veriyor; kimliğimizi dürüstçe belirtiyoruz.
+                // Some sites return 403 to requests without a User-Agent; we state our identity honestly.
                 request.Headers.TryAddWithoutValidation("User-Agent",
-                    "Mozilla/5.0 (compatible; VitenaBot/1.0; +https://vitena.care)");
+                    "Mozilla/5.0 (compatible; ResearchAgent/1.0; +https://github.com/alicakil/dotnet-research-agent)");
                 request.Headers.TryAddWithoutValidation("Accept", "text/html,application/xhtml+xml");
 
                 using var response = await httpClient.SendAsync(
@@ -232,8 +236,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                 var structured = ExtractStructuredProfile(html);
                 var title = ExtractTitle(html);
 
-                // Yapılandırılmış veri VARSA düz metin kısa kalsa bile sayfa işe yarar: dizin
-                // profillerinin değerli kısmı zaten JSON-LD'de duruyor.
+                // If structured data EXISTS the page is useful even when the plain text stays short: the
+                // valuable part of directory profiles sits in the JSON-LD anyway.
                 return text.Length < 80 && structured is null
                     ? new FetchedPage(current.ToString(), false, null, "too_little_text")
                     : new FetchedPage(current.ToString(), true, text, null, structured, keepHtml ? html : null, title);
@@ -247,7 +251,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         }
         catch (Exception ex)
         {
-            logger.LogInformation("WebPageFetcher {Url} başarısız: {Message}", url, ex.Message);
+            logger.LogInformation("WebPageFetcher {Url} failed: {Message}", url, ex.Message);
             return new FetchedPage(url, false, null, "fetch_error");
         }
     }
@@ -267,14 +271,15 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     }
 
     /// <summary>
-    /// SSRF koruması: host'un çözümlendiği TÜM adresler public olmalı. Lambda VPC içinde
-    /// çalışıyor — 10.x, 169.254.x (IMDS), 127.x, ::1 gibi hedefler kesinlikle dışarı kapalı.
+    /// SSRF protection: ALL addresses the host resolves to must be public. The fetcher runs inside a VPC
+    /// (AWS Lambda in our deployment), so targets such as 10.x, 169.254.x (IMDS), 127.x and ::1 must be
+    /// strictly off limits.
     ///
-    /// Dönen sebep kodu AYRIŞTIRILMIŞTIR. İkisi de "çekmedik" ile biter ama anlamları taban tabana
-    /// zıttır: <c>private_address_blocked</c> güvenlik kararıdır, <c>host_not_found</c> ise adresin
-    /// hiç var olmadığını söyler. Tek kod altında toplanınca operatöre yanlış bilgi gidiyordu —
-    /// raporlandı, ki bu düzeltilebilir bir arıza izlenimi verir. Sebep koduna güvenip
-    /// araştıracağımız için doğru olması gerekiyor.
+    /// The returned reason code is deliberately DISTINCT. Both outcomes end in "we did not fetch it", but
+    /// their meanings are opposite: <c>private_address_blocked</c> is a security decision, while
+    /// <c>host_not_found</c> says the address does not exist at all. Under a single code the operator got
+    /// wrong information — a domain that does not exist was reported as blocked, which looks like a fixable
+    /// fault. We investigate based on the reason code, so it has to be right.
     /// </summary>
     public static async Task<string?> ResolveBlockReasonAsync(Uri uri, CancellationToken ct)
     {
@@ -287,11 +292,11 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         }
         catch (SocketException)
         {
-            return "host_not_found";     // NXDOMAIN — böyle bir alan adı yok
+            return "host_not_found";     // NXDOMAIN — no such domain
         }
         catch
         {
-            return "dns_error";          // çözümleme başarısız (timeout, geçici arıza)
+            return "dns_error";          // resolution failed (timeout, transient failure)
         }
 
         if (addresses.Length == 0) return "host_not_found";
@@ -299,8 +304,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     }
 
     /// <summary>
-    /// Adres dışarıya açık mı: özel ağ, loopback, link-local, CGNAT ve ayrılmış aralıklar değil. Sağlık öyküsünün
-    /// dosya çekicisi de aynı kurala bakar (HealthRemoteFileFetcher): kural tek yerde dursun.
+    /// Is the address publicly routable: not a private network, loopback, link-local, CGNAT or reserved range.
+    /// Public so that other outbound fetchers can share the same rule — it should live in one place.
     /// </summary>
     public static bool IsPublic(IPAddress ip)
     {
@@ -327,7 +332,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         };
     }
 
-    // ── HTML → düz metin ──────────────────────────────────────────────────────
+    // ── HTML → plain text ──────────────────────────────────────────────────────
 
     private static readonly Regex ScriptStyleRegex =
         new(@"<(script|style|noscript|svg)[^>]*>.*?</\1>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
@@ -336,27 +341,28 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private static readonly Regex MetaTagRegex = new(@"<meta\b[^>]*>", RegexOptions.IgnoreCase);
 
     /// <summary>
-    /// Boşluktan ibaret satırlar tek satır sonuna iner. Ölçüldü (16 Eki 2026, VIT-1020): bir doktortakvimi profilinin düz
-    /// metni 32 bin karakterdi ve bunun üçte biri boşluk satırlarıydı; 8.000 karakterlik tavan eğitim ve deneyim
-    /// bölümlerine (8.700-10.600) varmadan doluyordu. Sıkıştırınca aynı tavana özgeçmişin tamamı sığıyor (6.200-7.500),
-    /// hasta yorumları (9.000'den sonra) dışarıda kalıyor. Tavan aynı: modele giden metin büyümedi, boşluğu gitti.
+    /// Whitespace-only lines collapse into a single line break. Measured (16 Oct 2026): the plain text of one directory
+    /// profile was 32,000 characters and a third of it was blank lines; the 8,000-character cap filled up before reaching
+    /// the education and experience sections (at 8,700-10,600). After collapsing, the whole background fits under the same
+    /// cap (6,200-7,500) and only the reviews (after 9,000) stay out. The cap is unchanged: the text sent to the model did
+    /// not grow, the blank space just went away.
     /// </summary>
     private static readonly Regex BlankLinesRegex = new(@"[ \t]*\n\s*");
-    /// <summary>Öznitelik değeri — kapanış tırnağı AÇILIŞ tırnağıyla eşlenir; aksi halde
-    /// içerikteki kesme işareti ("Bursa'da …") değeri erken keser.</summary>
+    /// <summary>Attribute value — the closing quote is matched to the OPENING quote; otherwise
+    /// an apostrophe inside the content ("Joe's Garage …") would cut the value short.</summary>
     private static readonly Regex AttrRegex =
         new(@"\b(name|property|content)\s*=\s*(?:(""|')(?<v>.*?)\2|(?<v>[^\s""'>]+))",
             RegexOptions.IgnoreCase | RegexOptions.Singleline);
 
     private static readonly string[] WantedMeta = { "description", "og:description", "og:title" };
 
-    /// <summary>Görünür metni çıkarır; meta description/og:description'ı da başa ekler
+    /// <summary>Extracts the visible text; also prepends the meta description / og:description.</summary>
     public static string HtmlToText(string? html)
     {
         if (string.IsNullOrWhiteSpace(html)) return string.Empty;
 
-        // Meta etiketleri tek tek işlenir: öznitelik SIRASI değişken (content önce de gelebilir),
-        // tek mega-regex bunu güvenilir yakalamıyor.
+        // Meta tags are processed one by one: the ORDER of attributes varies (content can come first),
+        // and a single mega-regex does not catch that reliably.
         var metaParts = new List<string>();
         foreach (Match tag in MetaTagRegex.Matches(html))
         {
@@ -386,7 +392,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private static readonly Regex TitleTagRegex =
         new(@"<title[^>]*>(.*?)</title>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
-    /// <summary>Sayfanın başlığı: og:title (paylaşım için yazılmış, daha temiz), yoksa &lt;title&gt;. Yoksa null.</summary>
+    /// <summary>The page title: og:title (written for sharing, so cleaner), else &lt;title&gt;. Null if there is neither.</summary>
     public static string? ExtractTitle(string? html)
     {
         if (string.IsNullOrWhiteSpace(html)) return null;
@@ -413,13 +419,13 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return title.Length > 0 ? title : null;
     }
 
-    // ── JSON-LD → mesleki profil özeti ────────────────────────────────────────
+    // ── JSON-LD → profile summary ────────────────────────────────────────
 
     private static readonly Regex JsonLdRegex =
         new(@"<script[^>]+type\s*=\s*[""']application/ld\+json[""'][^>]*>(.*?)</script>",
             RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
-    /// <summary>Kişi/işletme anlamına gelen schema.org tipleri — dizinlerde profil bunlardan biridir.</summary>
+    /// <summary>schema.org types that stand for a person or a business — a profile on a directory is one of these.</summary>
     private static readonly HashSet<string> ProfileTypes = new(StringComparer.OrdinalIgnoreCase)
     {
         "Physician", "Person", "MedicalBusiness", "MedicalClinic", "LocalBusiness",
@@ -430,15 +436,16 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private const int MaxReviews = 3;
 
     /// <summary>
-    /// Sayfanın JSON-LD bloklarından mesleki profil alanlarını süzer.
+    /// Extracts profile fields from the page's JSON-LD blocks.
     ///
-    /// Neden beyaz liste: JSON-LD'nin tamamı yüz binlerce karakter olabiliyor (navigasyon, breadcrumb,
-    /// site şeması) ve ham hâlde modele vermek hem pahalı hem gürültülü. Buradaki alanlar, uygunluk
-    /// puanını gerçekten hareket ettiren şeyler: kendi muayenehanesi var mı, randevu/fiyat açık mı,
-    /// kaç yorum almış — yani "kendi danışan akışına sahip mi" sorusunun cevabı.
+    /// Why an allowlist: the whole JSON-LD can run to hundreds of thousands of characters (navigation,
+    /// breadcrumbs, site schema), and handing it to the model raw is both expensive and noisy. The fields
+    /// kept here are the ones that really matter when assessing a subject: does it have its own premises,
+    /// are booking and prices public, how many reviews has it received — i.e. the answer to "does it have
+    /// a customer flow of its own".
     ///
-    /// TAM TOLERANSLI: bozuk/kesik JSON sessizce atlanır (indirme tavanı bir bloğu ortadan kesmiş
-    /// olabilir). Hiçbir şey bulunamazsa null döner ve çağıran düz metinle devam eder.
+    /// FULLY TOLERANT: broken or truncated JSON is skipped silently (the download cap may have cut a block
+    /// in half). If nothing is found it returns null and the caller carries on with the plain text.
     /// </summary>
     public static string? ExtractStructuredProfile(string? html)
     {
@@ -453,7 +460,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
                 using var doc = JsonDocument.Parse(WebUtility.HtmlDecode(block.Groups[1].Value).Trim());
                 CollectProfiles(doc.RootElement, lines, 0);
             }
-            catch { /* bozuk veya kesik blok — atla */ }
+            catch { /* malformed or truncated block — skip */ }
         }
 
         if (lines.Count == 0) return null;
@@ -461,7 +468,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return joined.Length > MaxStructuredChars ? joined[..MaxStructuredChars] : joined;
     }
 
-    /// <summary>JSON-LD ağacında gezer: dizi, @graph ve iç içe düğümler hepsi olabiliyor.</summary>
+    /// <summary>Walks the JSON-LD tree: arrays, @graph and nested nodes can all occur.</summary>
     private static void CollectProfiles(JsonElement node, List<string> lines, int depth)
     {
         if (depth > 4 || lines.Count > 40) return;
@@ -504,9 +511,9 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
             var joined = string.Join(", ", parts);
             if (joined.Length > 0)
             {
-                // Birden çok adres = birden çok çalışma yeri; uygunluk açısından anlamlı bir sinyal.
+                // Several addresses = several places of work; a meaningful signal.
                 var count = addr.ValueKind == JsonValueKind.Array ? addr.GetArrayLength() : 1;
-                lines.Add($"  address: {Cap(joined, 200)}{(count > 1 ? $" (+{count - 1} adres daha)" : "")}");
+                lines.Add($"  address: {Cap(joined, 200)}{(count > 1 ? $" (+{count - 1} more)" : "")}");
             }
         }
 
@@ -514,7 +521,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         {
             var value = Text(rating, "ratingValue");
             var count = Text(rating, "reviewCount") ?? Text(rating, "ratingCount");
-            if (value is not null) lines.Add($"  rating: {value}{(count is not null ? $" ({count} yorum)" : "")}");
+            if (value is not null) lines.Add($"  rating: {value}{(count is not null ? $" ({count} reviews)" : "")}");
         }
 
         if (node.TryGetProperty("review", out var reviews))
@@ -532,7 +539,7 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         }
     }
 
-    /// <summary>Alanı metin olarak okur; schema.org'da aynı alan string, sayı veya {name:...} olabiliyor.</summary>
+    /// <summary>Reads a field as text; in schema.org the same field can be a string, a number or {name:...}.</summary>
     private static string? Text(JsonElement node, string property)
     {
         if (node.ValueKind != JsonValueKind.Object || !node.TryGetProperty(property, out var v)) return null;
@@ -555,8 +562,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
         return clean.Length > max ? clean[..max] + "…" : clean;
     }
 
-    /// <summary>NBSP ve akraba Unicode boşlukları normal boşluğa çevirip sıkıştırır — modele
-    /// giden metinde görünmez karakter bırakmamak için (token şişmesi + eşleşme sorunları).</summary>
+    /// <summary>Turns NBSP and related Unicode spaces into a normal space and collapses runs — so that
+    /// no invisible characters reach the model (token bloat + matching problems).</summary>
     private static string Normalize(string s) =>
         WhitespaceRegex.Replace(
             s.Replace(' ', ' ').Replace(' ', ' ').Replace(' ', ' ')
@@ -566,7 +573,8 @@ public sealed class WebPageFetcher(HttpClient httpClient, ILogger<WebPageFetcher
     private static bool TryGetHost(string url, out string host)
     {
         host = string.Empty;
-        // TryGetHost false döner ve IsBlockedHost onu "bloklu değil" sayar — blok listesinde delik.
+        // Normalize first: a scheme-less address ("linkedin.com/in/x") would fail TryCreate, TryGetHost would
+        // return false and IsBlockedHost would treat it as "not blocked" — a hole in the blocklist.
         if (!Uri.TryCreate(NormalizeUrl(url ?? string.Empty), UriKind.Absolute, out var uri)) return false;
         host = uri.Host.ToLowerInvariant();
         if (host.StartsWith("www.")) host = host[4..];

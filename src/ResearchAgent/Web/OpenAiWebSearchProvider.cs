@@ -3,23 +3,24 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Web;
 
 /// <summary>
-/// OpenAI Responses API'nin gömülü <c>web_search</c> aracıyla arama. Serper gibi ham SERP
-/// satın almak yerine modelin kendi arama aracını kullanır.
+/// Search through the built-in <c>web_search</c> tool of the OpenAI Responses API. Instead of buying
+/// raw SERP data like Serper, it uses the model's own search tool.
 ///
-/// Neden ikinci bir sağlayıcı: OpenAI anahtarı Lambda ortamında ZATEN var → yeni SSM parametresi
-/// ve manuel <c>cdk deploy</c> gerekmeden çalışır. Serper devre dışıyken kanıt toplama ayakta kalır.
-/// Yetenek ayrıca dikey-bağımsız: ileride başka özellikler de bu arayüzden faydalanabilir.
+/// Why a second provider: the OpenAI key is ALREADY configured for the LLM layer → it works without a
+/// new secret and without an infrastructure deploy. Evidence gathering stays alive while Serper is off.
+/// The capability is also not tied to any vertical: other features can use this interface later.
 ///
-/// Kaynakları modelin ANLATISINDAN değil, yanıttaki <c>url_citation</c> annotation'larından okur —
-/// makine üretimi, hallüsinasyona kapalı; snippet olarak atıf yapılan metin aralığı kullanılır.
-/// Böylece kimlik eşleştirmesi için gereken (başlık + snippet + url) üçlüsü korunur.
+/// It reads the sources from the <c>url_citation</c> annotations of the response, NOT from the model's
+/// narrative — machine-generated, so the sources cannot be hallucinated; the cited text span is used as
+/// the snippet. That keeps the (title + snippet + url) triple that identity matching needs.
 ///
-/// ⚠️ İZLENEBİLİRLİK: bu çağrı adapter'ları BYPASS eder (Responses API farklı bir yüzey), bu yüzden
-/// <c>AiTrace</c>'e satır DÜŞMEZ. Maliyet OpenAI Costs API'sinde (admin panelinde) görünür; buradaki
-/// token kullanımı ayrıca log'a yazılır ki CloudWatch'tan izlenebilsin.
+/// ⚠️ TRACEABILITY: this call BYPASSES the adapters (the Responses API is a different surface), so NO
+/// record lands in the AI trace (<c>AiTraceRecord</c>). The cost shows up in the OpenAI Costs API (admin
+/// dashboard); the token usage is also written to the log here, so it can be followed in your log tooling
+/// (e.g. CloudWatch).
 /// </summary>
 public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
 {
@@ -42,17 +43,17 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
         _options = options.Value;
         _logger = logger;
         _apiKey = configuration["Ai:OpenAI:ApiKey"] ?? Environment.GetEnvironmentVariable("OPENAI_API_KEY");
-        // Arama + sayfa okuma + muhakeme modelin tarafında olduğu için tek çağrı UZUN sürer.
-        // 31 Tem 2026 ölçümü (gerçek profiller): 45 sn · 52 sn · 62 sn · 68 sn · 95 sn.
-        // Eski 40 sn'lik değer üst sınırın ALTINDAYDI — eskalasyon çağrısı düzenli olarak
-        // TaskCanceledException ile düşer, kanıt toplanmaz ve sebebi "timeout" diye görünürdü.
-        // 180 sn üst kuyruğa da yer bırakıyor; Lambda'nın 600 sn'si bunu rahat kapsıyor.
+        // Search + page reading + reasoning all happen on the model's side, so a single call takes a LONG time.
+        // Measured on 31 Jul 2026 (real runs): 45 s · 52 s · 62 s · 68 s · 95 s.
+        // The old 40 s value was BELOW that whole range — the escalation call routinely died with a
+        // TaskCanceledException, no evidence was gathered, and the cause just looked like a plain "timeout".
+        // 180 s also leaves room for the upper tail; the 600 s Lambda timeout we run under covers it comfortably.
         _httpClient.Timeout = TimeSpan.FromSeconds(180);
     }
 
     /// <summary>
-    /// Anahtar var AMA <see cref="AiOptions.EnableOpenAiWebSearch"/> kill-switch'i de açık olmalı.
-    /// Kapalıyken eskalasyon hiç denenmez ve araştırma hızlı kademenin bulduğuyla yetinir.
+    /// Needs the key AND the <see cref="AiOptions.EnableOpenAiWebSearch"/> kill switch to be on.
+    /// While it is off, escalation is never attempted and the research settles for what the fast tier found.
     /// </summary>
     public bool IsConfigured => _options.EnableOpenAiWebSearch && !string.IsNullOrWhiteSpace(_apiKey);
 
@@ -67,15 +68,15 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
             {
                 model = _options.WebSearchModel,
                 tools = new object[] { new { type = "web_search" } },
-                // Model YORUM yapmasın, sadece arayıp kaynakları göstersin: kimlik kararını
-                // sonraki (terra) sentez adımı veriyor, burada ham sinyal istiyoruz.
+                // The model must not interpret, just search and show the sources: the identity decision
+                // is made by the later synthesis step; here we want the raw signal.
                 input =
                     $"Search the public web for: {query}\n\n" +
-                    "List the most relevant public professional sources you find (personal or clinic " +
-                    "websites, professional directories, press). For each source write one short line " +
-                    "stating what it shows about that person (profession, city, workplace, seniority). " +
-                    "Do not speculate, do not merge different people, and do not conclude anything — " +
-                    "just report what each source says. If you find nothing relevant, say so plainly.",
+                    "List the most relevant public sources you find (official websites, directories, " +
+                    "registries, press). For each source write one short line stating what it shows about " +
+                    "the subject. Do not speculate, do not merge different subjects that share a name, and " +
+                    "do not conclude anything: just report what each source says. If you find nothing " +
+                    "relevant, say so plainly.",
             };
 
             using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint);
@@ -87,7 +88,7 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
 
             if (!response.IsSuccessStatusCode)
             {
-                _logger.LogWarning("OpenAI web_search başarısız: HTTP {Status} {Body}",
+                _logger.LogWarning("OpenAI web_search failed: HTTP {Status} {Body}",
                     (int)response.StatusCode, AiAdapterHelpers.Truncate(payload));
                 return WebSearchOutcome.Fail($"HTTP {(int)response.StatusCode}");
             }
@@ -95,22 +96,22 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
             var results = ParseCitations(payload, maxResults);
             LogUsage(payload, query, results.Count);
 
-            // Modelin DÜZYAZISI da taşınıyor, yalnız linkler değil. Ölçtük: bu sağlayıcının asıl
-            // olarak gösteren hiçbir kaynak yok" ya da "bu kaynak farklı bir tam ad kullanıyor"
-            // gibi NEGATİF ve AYIRT EDİCİ bulgular yalnız burada var. Yalnız atıfları alsaydık
-            // 45–95 sn'lik çağrının en iyi kısmını çöpe atmış olurduk.
+            // The model's PROSE is carried along too, not just the links. We measured it: NEGATIVE and
+            // DISTINGUISHING findings such as "no source shows this subject as X" or "this source uses a
+            // different full name" exist only there. Had we kept only the citations, we would have thrown
+            // away the best part of a 45–95 s call.
             return WebSearchOutcome.Ok(results, ExtractNarrative(payload));
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "OpenAI web_search hatası: {Query}", query);
+            _logger.LogWarning(ex, "OpenAI web_search error: {Query}", query);
             return WebSearchOutcome.Fail(ex.GetType().Name);
         }
     }
 
     /// <summary>
-    /// Yanıtı gezip <c>output[].content[].annotations[]</c> içindeki <c>url_citation</c>'ları toplar.
-    /// Snippet = atfın işaret ettiği metin aralığı (start_index..end_index); aralık bozuksa metnin başı.
+    /// Walks the response and collects the <c>url_citation</c> entries inside <c>output[].content[].annotations[]</c>.
+    /// Snippet = the text span the citation points at (start_index..end_index); if the range is invalid, the start of the text.
     /// </summary>
     private static List<WebSearchResult> ParseCitations(string payload, int maxResults)
     {
@@ -155,8 +156,8 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
     }
 
     /// <summary>
-    /// Modelin serbest metnini (tüm <c>output[].content[].text</c> parçalarını) birleştirir.
-    /// Sentez adımına "arama motorunun kendi raporu" olarak verilir — kimlik ayrımı burada.
+    /// Joins the model's free text (all <c>output[].content[].text</c> parts).
+    /// It is handed to the synthesis step as "the search engine's own report" — this is where the identity disambiguation lives.
     /// </summary>
     private static string? ExtractNarrative(string payload)
     {
@@ -185,7 +186,7 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
             var joined = string.Join("\n", parts).Trim();
             return joined.Length > MaxNarrativeChars ? joined[..MaxNarrativeChars] : joined;
         }
-        catch { return null; }   // metin bonus; okunamaması atıfları geçersiz kılmaz
+        catch { return null; }   // the text is a bonus; failing to read it does not invalidate the citations
     }
 
     private static string ExtractSnippet(string text, JsonElement annotation)
@@ -197,7 +198,7 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
         var end = annotation.TryGetProperty("end_index", out var e) && e.ValueKind == JsonValueKind.Number
             ? e.GetInt32() : 0;
 
-        // Bozuk/ters aralık → metnin başından bir parça al (kaynak yine de kullanılabilir olsun).
+        // Invalid/reversed range → take a piece from the start of the text (so the source is still usable).
         if (start < 0 || end <= start || start >= text.Length)
             return text[..Math.Min(MaxSnippetChars, text.Length)].Trim();
 
@@ -206,7 +207,7 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
         return span.Length > MaxSnippetChars ? span[..MaxSnippetChars].Trim() : span.Trim();
     }
 
-    /// <summary>Token kullanımını log'a yazar — bu çağrı AiTrace'e düşmediği için tek görünürlük burası.</summary>
+    /// <summary>Writes token usage to the log — this call does not land in the AI trace, so this is the only visibility.</summary>
     private void LogUsage(string payload, string query, int resultCount)
     {
         try
@@ -217,13 +218,13 @@ public sealed class OpenAiWebSearchProvider : IEscalationSearchProvider
                 var input = usage.TryGetProperty("input_tokens", out var i) ? i.GetInt32() : 0;
                 var output = usage.TryGetProperty("output_tokens", out var o) ? o.GetInt32() : 0;
                 _logger.LogInformation(
-                    "OpenAI web_search: model={Model} in={In} out={Out} sonuç={Count} sorgu={Query}",
+                    "OpenAI web_search: model={Model} in={In} out={Out} results={Count} query={Query}",
                     _options.WebSearchModel, input, output, resultCount, AiAdapterHelpers.Truncate(query));
                 return;
             }
         }
-        catch { /* usage okunamadıysa sorun değil — sonucu etkilemez */ }
+        catch { /* not a problem if usage could not be read — it does not affect the result */ }
 
-        _logger.LogInformation("OpenAI web_search: sonuç={Count} sorgu={Query}", resultCount, AiAdapterHelpers.Truncate(query));
+        _logger.LogInformation("OpenAI web_search: results={Count} query={Query}", resultCount, AiAdapterHelpers.Truncate(query));
     }
 }

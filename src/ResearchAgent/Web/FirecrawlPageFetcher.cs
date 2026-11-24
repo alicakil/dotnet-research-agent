@@ -2,20 +2,20 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Web;
 
 /// <summary>
-/// JS RENDER EDEN çekme kolu. Doğrudan HTTP çekimiyle
-/// (<see cref="WebPageFetcher"/>) okunamayan sayfalar için ikinci kademe.
+/// The fetch arm that RENDERS JavaScript. A second tier for pages that cannot be read with a direct
+/// HTTP fetch (<see cref="WebPageFetcher"/>).
 ///
-/// istemci tarafında render ediyor; düz HTTP çekimi boş bir kabuk görüyor.
+/// Typical targets render on the client side: a plain HTTP fetch sees only an empty shell.
 ///
-/// ⚠️ Bu kol PAHALI ve KOTALI olduğu için ASLA ilk sırada çalışmaz — bkz.
-/// <see cref="CompositeWebPageFetcher"/>. Kotayı, düz çekimin zaten hallettiği sayfalara
-/// harcamak, gerçekten ihtiyaç duyulan sayfa için kota bırakmamak demek.
+/// ⚠️ This arm is EXPENSIVE and QUOTA-LIMITED, so it NEVER runs first — see
+/// <see cref="CompositeWebPageFetcher"/>. Spending the quota on pages that a plain fetch already handles
+/// would leave no quota for the pages that really need it.
 ///
-/// Anahtar yoksa <see cref="IsConfigured"/> false döner ve kol zincirden sessizce düşer;
-/// araştırma bugünkü davranışıyla devam eder.
+/// Without a key, <see cref="IsConfigured"/> returns false and the arm silently drops out of the chain;
+/// research simply carries on as it did before, with plain fetching only.
 /// </summary>
 public sealed class FirecrawlPageFetcher : IWebPageFetcher
 {
@@ -44,8 +44,8 @@ public sealed class FirecrawlPageFetcher : IWebPageFetcher
         if (!IsConfigured)
             return new FetchedPage(url, false, null, "firecrawl_not_configured");
 
-        // SSRF ve giriş duvarı kuralları BURADA DA geçerli. Render eden bir kol, engelli host
-        // onların şartlarına aykırı olurdu, ve zaten e-posta vermezdi.
+        // The SSRF and login-wall rules apply HERE TOO. Rendering a blocked host would breach
+        // its terms of service, and a login wall would not give us anything useful anyway.
         if (WebPageFetcher.IsBlockedHost(url))
             return new FetchedPage(url, false, null, "blocked_host");
 
@@ -81,7 +81,7 @@ public sealed class FirecrawlPageFetcher : IWebPageFetcher
                 ? src.GetString() ?? url
                 : url;
 
-            // Başlık (VIT-1185): adı yazılmadan linkle açılan kliniğin adı buradan çıkarılır.
+            // Title: the name of a subject that was added by link alone, without a typed name, is taken from here.
             string? title = null;
             if (data.TryGetProperty("metadata", out var m))
                 foreach (var key in new[] { "ogTitle", "og:title", "title" })
@@ -96,7 +96,7 @@ public sealed class FirecrawlPageFetcher : IWebPageFetcher
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Firecrawl çekimi başarısız: {Url}", url);
+            _logger.LogWarning(ex, "Firecrawl fetch failed: {Url}", url);
             return new FetchedPage(url, false, null, "firecrawl_failed");
         }
     }
@@ -106,25 +106,26 @@ public sealed class FirecrawlPageFetcher : IWebPageFetcher
 }
 
 /// <summary>
-/// İki kademeli sayfa çekme: ÖNCE ucuz düz HTTP, gerekirse JS render eden kol.
-/// Aynı desen arama tarafında zaten kurulu (<see cref="CompositeWebSearchProvider"/>) —
-/// ucuzdan pahalıya, ilk başarılıda dur.
+/// Two-tier page fetching: FIRST a cheap plain HTTP fetch, then the JS-rendering arm if needed.
+/// The same pattern is already used on the search side (<see cref="CompositeWebSearchProvider"/>) —
+/// cheapest to most expensive, stop at the first success.
 ///
-/// Eskalasyon KOŞULLU, çünkü render eden kol kotalı. Üç tetik:
-///  • düz çekim başarısızsa,
-///  • gövde şüpheli derecede kısaysa (400 karakterin altı),
-///  • gövde AYNI HOST'TA daha önce görülen bir gövdeyle BİREBİR AYNIYSA → SPA kabuğu.
+/// Escalation is CONDITIONAL, because the rendering arm is quota-limited. Three triggers:
+///  • the plain fetch failed,
+///  • the body is suspiciously short (under 400 characters),
+///  • the body is IDENTICAL to a body seen earlier ON THE SAME HOST → an SPA shell.
 ///
-/// düz çekimde **tam olarak aynı 2638 karakteri** döndürüyor — tek sayfalık uygulama her rotada
-/// aynı HTML iskeletini veriyor, içerik istemcide render ediliyor. Kabuk 2638 karakter olduğu
-/// için "kısa gövde" kuralı bunu YAKALAMIYORDU ve kol sessizce hiç devreye girmeyecekti.
-/// Aynı sayfada Firecrawl 7712 karakterle gerçek ekip listesini getirdi.
+/// Measured in production: on one site, a plain fetch returned **exactly the same 2638 characters** for
+/// every route — it is a single-page app, so every route serves the same HTML skeleton and the content is
+/// rendered on the client. Because the shell is 2638 characters long, the "short body" rule did NOT catch
+/// it, and the arm would silently never have kicked in. On the same page Firecrawl returned the real
+/// team listing, at 7712 characters.
 ///
-/// Tekrar tespiti istek kapsamında (scoped) tutuluyor: bir araştırma turu boyunca hatırlıyor,
-/// turlar arasında taşınmıyor.
+/// Repeat detection is kept per request scope: it remembers across one research run and is not carried
+/// between runs.
 ///
-/// Kalıcı engeller eskalasyona GİRMEZ: engelli host, giriş duvarı ve geçersiz adres, render
-/// edilse de aynı sonucu verir — o kotayı harcamak boşuna.
+/// Permanent blockers do NOT escalate: a blocked host, a login wall and an invalid address give the same
+/// result even when rendered — spending the quota on them is pointless.
 /// </summary>
 public sealed class CompositeWebPageFetcher(
     WebPageFetcher primary,
@@ -134,46 +135,46 @@ public sealed class CompositeWebPageFetcher(
     private const int ThinBodyThreshold = 400;
 
     /// <summary>
-    /// Render etmenin DEĞİŞTİREMEYECEĞİ arızalar. 404/410 bu listede olmalı ve olmaması prod'da
-    /// ölçüldü (24 Ağu): yol tahmini <c>/equipo</c>'yu deniyor, site 404 dönüyor, düz çekim doğru
-    /// şekilde eliyor — ama composite "başarısız" görüp Firecrawl'a geçiyordu ve Firecrawl
-    /// "Página no encontrada" sayfasını sorunsuz render edip BAŞARILI dönüyordu. Var olmayan bir
-    /// sayfa böylece kanıt yığınına giriyordu.
+    /// Failures that rendering CANNOT change. 404/410 must be on this list, and what happens without them
+    /// was observed in production (24 Aug): path guessing tries <c>/equipo</c> (Spanish for "team"), the site
+    /// returns 404, and the plain fetch correctly rejects it — but the composite saw a "failure" and passed
+    /// it on to Firecrawl, which happily rendered the "Página no encontrada" (page not found) page and
+    /// returned SUCCESS. A page that does not exist thus ended up in the evidence pile.
     ///
-    /// 403 bilerek DIŞARIDA: orası çoğu zaman bot engeli ve render eden kolun çözebileceği tek
-    /// HTTP arızası o.
+    /// 403 is deliberately NOT on the list: it is often a bot block, and it is the only HTTP failure
+    /// the rendering arm can get around.
     /// </summary>
     private static readonly string[] PermanentSkips =
     [
         "blocked_host", "blocked_host_after_redirect", "login_wall", "consent_wall", "invalid_url", "empty_url",
         "http_404", "http_410", "http_400", "http_401",
-        // Alan adı yoksa (NXDOMAIN) ya da hedef özel ağdaysa render edecek bir sayfa da yok.
+        // If the domain does not exist (NXDOMAIN) or the target is on a private network, there is no page to render either.
         "host_not_found", "private_address_blocked"
     ];
 
-    /// <summary>host → o host'ta düz çekimden dönen gövdelerin parmak izleri.</summary>
+    /// <summary>host → fingerprints of the bodies a plain fetch returned on that host.</summary>
     private readonly Dictionary<string, HashSet<string>> _seenBodies = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Bu turda ULAŞILAMADIĞI kanıtlanmış host'lar. Ölü bir host'a her yol denemesi iki kez
-    /// para/zaman yakıyor (düz çekim zaman aşımı + render eden kol), ve araştırmanın 180 sn'lik
-    /// bütçesi bununla doluyor.
+    /// Hosts proven UNREACHABLE in this run. Every path tried on a dead host burns money and time twice
+    /// (the plain-fetch timeout plus the rendering arm), and that fills the research run's 180 s budget.
     ///
-    /// Ölçüldü (DENTICITY, 27 Ağu 2026): denticity.com'a dört adres denendi, her biri ~38 sn
-    /// (8 sn zaman aşımı + ~30 sn Firecrawl) yaktı. 152 saniye sonra bütçe bitti ve SIRADAKİ ADIM —
-    /// elimizdeki ÇALIŞAN kanıtı da öldürdü.
+    /// Measured (27 Aug 2026): four addresses on one dead site were tried and each burned ~38 s (8 s timeout
+    /// + ~30 s Firecrawl). After 152 seconds the budget ran out and the NEXT STEP died with it — along with
+    /// the WORKING evidence we already had.
     ///
-    /// Host bir kez ölü işaretlenince o turdaki kalan adresleri anında elenir. Turlar arasında
-    /// taşınmaz (scoped): geçici bir arıza kliniği kalıcı olarak kör etmemeli.
+    /// Once a host is marked dead, its remaining addresses in that run are dropped immediately. It is not
+    /// carried between runs (scoped): a temporary outage must not blind us to a site permanently.
     /// </summary>
     private readonly HashSet<string> _deadHosts = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>
-    /// <see cref="_seenBodies"/> ile <see cref="_deadHosts"/>'un kilidi: bir turun sayfaları aynı anda da okunuyor (uzman
+    /// Lock for <see cref="_seenBodies"/> and <see cref="_deadHosts"/>: the pages of one run are also read
+    /// concurrently (parallel evidence branches).
     /// </summary>
     private readonly object _gate = new();
 
-    /// <summary>Taşıma katmanı arızaları — sayfa yok değil, host'a ULAŞILAMIYOR.</summary>
+    /// <summary>Transport-layer failures — not a missing page: the host is UNREACHABLE.</summary>
     private static readonly string[] UnreachableReasons = ["timeout", "fetch_error", "dns_error"];
 
     public async Task<FetchedPage> FetchAsync(string url, CancellationToken ct = default)
@@ -198,28 +199,28 @@ public sealed class CompositeWebPageFetcher(
         if (page.Success && !thin && !shell) return page;
 
         logger.LogInformation(
-            "Düz çekim yetersiz ({Sebep}) — JS render eden kola geçiliyor: {Url}",
+            "Plain fetch insufficient ({Reason}) — switching to the JS-rendering arm: {Url}",
             !page.Success ? page.SkipReason
-                : shell ? $"aynı host'ta birebir aynı gövde ({length} karakter) → SPA kabuğu"
-                : $"gövde {length} karakter",
+                : shell ? $"identical body already seen on the same host ({length} characters) → SPA shell"
+                : $"body is {length} characters",
             url);
 
         var viaRender = await rendered.FetchAsync(url, ct);
 
-        // İki kol da ulaşamadıysa host ölü sayılır: aynı sitenin diğer adreslerini denemek
-        // bütçeyi yakmaktan başka bir şey yapmıyor.
+        // If neither arm could reach it, the host counts as dead: trying the site's other addresses
+        // does nothing but burn the budget.
         if (!viaRender.Success && IsUnreachable(page)) MarkDead(host, url);
 
-        // Render de tutmazsa DÜZ ÇEKİMİN sonucu korunur: zayıf bir gövde, hiç gövdeden iyidir
-        // ve arıza sebebi ilk çekimin sebebidir — onu ikinci kolun mesajıyla değiştirmek
-        // teşhisi bozardı.
+        // If rendering fails too, the PLAIN FETCH's result is kept: a weak body beats no body,
+        // and the failure reason is the first fetch's reason — replacing it with the second arm's
+        // message would muddy the diagnosis.
         return viaRender.Success ? viaRender : page;
     }
 
     /// <summary>
-    /// Ham HTML yalnız düz çekimden gelir (render eden kol HTML vermez): yapılandırılmış veriye bakan kural için
-    /// (VIT-1223). Bu turda ulaşılamadığı kanıtlanmış host yine elenir; ölü işaretini yalnız <see cref="FetchAsync"/> koyar
-    /// (render eden kolu da denedikten sonra).
+    /// Raw HTML only comes from the plain fetch (the rendering arm returns no HTML): for rules that look at
+    /// structured data. A host already proven unreachable in this run is still skipped; only <see cref="FetchAsync"/>
+    /// marks a host dead (after it has tried the rendering arm too).
     /// </summary>
     public Task<FetchedPage> FetchHtmlAsync(string url, CancellationToken ct = default) =>
         IsDead(HostOf(url))
@@ -240,16 +241,16 @@ public sealed class CompositeWebPageFetcher(
         {
             if (host.Length == 0 || !_deadHosts.Add(host)) return;
         }
-        logger.LogInformation("Host ulaşılamıyor, bu turda kalan adresleri elenecek: {Host} ({Url})", host, url);
+        logger.LogInformation("Host unreachable, its remaining addresses will be skipped in this run: {Host} ({Url})", host, url);
     }
 
     private static string HostOf(string url) =>
         Uri.TryCreate(WebPageFetcher.NormalizeUrl(url), UriKind.Absolute, out var uri) ? uri.Host : string.Empty;
 
     /// <summary>
-    /// Bu gövde, aynı host'ta daha önce görülenin AYNISI mı? Öyleyse sayfaya özel içerik yok
-    /// demektir — SPA iskeleti. İlk görülüşte false döner (kıyaslanacak bir şey yok) ve gövde
-    /// kaydedilir; asıl yakalama ikinci sayfada olur, ki bizim için o sayfa ekip sayfasıdır.
+    /// Is this body IDENTICAL to one already seen on the same host? If so, there is no page-specific
+    /// content — it is an SPA skeleton. The first sighting returns false (there is nothing to compare
+    /// with) and the body is recorded; the real catch happens on the second page, which for us is the team page.
     /// </summary>
     private bool IsRepeatedBody(string url, string? text)
     {
@@ -257,8 +258,8 @@ public sealed class CompositeWebPageFetcher(
 
         var host = Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
 
-        // Uzunluk + baş/son parçası: tam metni sözlükte tutmak, sayfa başına on binlerce
-        // karakteri istek boyunca bellekte taşımak olurdu.
+        // Length + head/tail pieces: keeping the full text in the dictionary would mean carrying tens of
+        // thousands of characters per page in memory for the whole request.
         var head = text.Length <= 200 ? text : text[..200];
         var tail = text.Length <= 200 ? string.Empty : text[^200..];
         lock (_gate)

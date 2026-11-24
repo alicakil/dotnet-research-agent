@@ -1,17 +1,15 @@
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
-using WebApi.Services.Ai;
 using Xunit;
 
-namespace Nebula.UnitTests.WebApi.Services;
+namespace ResearchAgent.Tests;
 
 /// <summary>
-/// Arama sağlayıcı zincirinin semantiği. Gerçek durum bunu doğurdu: Serper anahtarı 403 verirken
-/// kanıt toplamanın durmaması, ama arızanın da yutulmaması gerekiyor. Ayrıca PARALEL çağrı olmamalı
-/// — aynı kanıt için iki kez ödemek istemiyoruz.
+/// Semantics of the search provider chain. A real incident motivated it: while the Serper key was
+/// returning 403, evidence gathering had to keep going, but the failure must not be swallowed either.
+/// Also, there must be NO parallel calls — we do not want to pay twice for the same evidence.
 /// </summary>
 [Trait("Category", "Unit")]
-[Trait("Category", "CareerDeepResearch")]
 public class CompositeWebSearchProviderTests
 {
     private static CompositeWebSearchProvider Build(params IWebSearchProvider[] providers) =>
@@ -27,13 +25,13 @@ public class CompositeWebSearchProviderTests
 
         outcome.Results.Should().HaveCount(2);
         outcome.Failed.Should().BeFalse();
-        expensive.Calls.Should().Be(0, "ucuz sağlayıcı sonuç döndüyse pahalıya para ödenmemeli");
+        expensive.Calls.Should().Be(0, "if the cheap provider returned results, the expensive one must not be paid for");
     }
 
     [Fact]
     public async Task SearchAsync_FirstFails_FallsBackToSecond()
     {
-        var broken = new StubProvider(configured: true, fails: true);   // Serper 403 senaryosu
+        var broken = new StubProvider(configured: true, fails: true);   // the Serper 403 scenario
         var backup = new StubProvider(configured: true, results: 3);
 
         var outcome = await Build(broken, backup).SearchAsync("q", 10);
@@ -70,7 +68,7 @@ public class CompositeWebSearchProviderTests
     [Fact]
     public async Task SearchAsync_AllEmpty_IsNotAFailure()
     {
-        // Zayıf dijital iz NORMAL (ölçtük) — arıza olarak raporlanmamalı.
+        // A weak digital footprint is NORMAL (we measured it) — it must not be reported as a failure.
         var outcome = await Build(
             new StubProvider(configured: true, results: 0),
             new StubProvider(configured: true, results: 0)).SearchAsync("q", 10);
@@ -104,7 +102,7 @@ public class CompositeWebSearchProviderTests
         await Build(broken, backup).SearchAsync("dermatologist Dublin", 5, "IE");
 
         broken.Country.Should().Be("IE");
-        backup.Country.Should().Be("IE", "yedek sağlayıcı da aynı ülkeden aramalı (VIT-1308)");
+        backup.Country.Should().Be("IE", "the backup provider must search from the same country too");
     }
 
     [Fact]

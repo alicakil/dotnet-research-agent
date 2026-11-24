@@ -2,13 +2,15 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// Google Gemini (Generative Language API) adapter'ı — ücretsiz fallback sağlayıcı.
-/// Ücretsiz tier; STANDART <c>AIza…</c> key gerekir (Ai:Gemini:ApiKey / GEMINI_API_KEY), SSM→env. NOT: AQ. formatı
-/// uyumsuz ("Multiple authentication credentials"). Free tier prompt'ları eğitimde kullanabilir → şimdilik gated
-/// test/demo (pseudonymized) için; gerçek-veri prod'da paid/Vertex (DPA + no-training) ya da DPA'lı başka provider.
+/// Google Gemini (Generative Language API) adapter — a free fallback provider.
+/// Free tier; needs a STANDARD <c>AIza…</c> key (<c>Ai:Gemini:ApiKey</c> / <c>GEMINI_API_KEY</c>, for example loaded
+/// from AWS SSM into the environment). NOTE: the <c>AQ.</c> key format is incompatible ("Multiple authentication
+/// credentials"). The free tier may use prompts for training → for now only for gated test/demo use
+/// (pseudonymized data); for real data in production use paid Gemini / Vertex (DPA + no-training) or another
+/// provider with a DPA.
 /// </summary>
 public sealed class GeminiAdapter : IAiProviderAdapter
 {
@@ -39,7 +41,7 @@ public sealed class GeminiAdapter : IAiProviderAdapter
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
-            throw new InvalidOperationException("Gemini API anahtarı tanımlı değil (Ai:Gemini:ApiKey / GEMINI_API_KEY).");
+            throw new InvalidOperationException("Gemini API key is not configured (Ai:Gemini:ApiKey / GEMINI_API_KEY).");
 
         var model = _options.Gemini.Model;
         var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);
@@ -64,7 +66,7 @@ public sealed class GeminiAdapter : IAiProviderAdapter
         using var httpRequest = new HttpRequestMessage(
             HttpMethod.Post,
             $"{BaseUrl}/models/{model}:generateContent");
-        httpRequest.Headers.Add("x-goog-api-key", _apiKey!); // IsConfigured guard ile non-null garanti
+        httpRequest.Headers.Add("x-goog-api-key", _apiKey!); // non-null is guaranteed by the IsConfigured guard
         httpRequest.Content = new StringContent(
             JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
@@ -73,7 +75,7 @@ public sealed class GeminiAdapter : IAiProviderAdapter
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("Gemini çağrısı başarısız ({Status}): {Body}",
+            _logger.LogWarning("Gemini call failed ({Status}): {Body}",
                 (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
             throw new HttpRequestException($"Gemini {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
         }
@@ -82,7 +84,7 @@ public sealed class GeminiAdapter : IAiProviderAdapter
         var root = doc.RootElement;
 
         if (!root.TryGetProperty("candidates", out var candidates) || candidates.GetArrayLength() == 0)
-            throw new HttpRequestException($"Gemini boş/engellenmiş yanıt döndürdü: {AiAdapterHelpers.Truncate(json)}");
+            throw new HttpRequestException($"Gemini returned an empty or blocked response: {AiAdapterHelpers.Truncate(json)}");
 
         var text = string.Empty;
         if (candidates[0].TryGetProperty("content", out var content) &&

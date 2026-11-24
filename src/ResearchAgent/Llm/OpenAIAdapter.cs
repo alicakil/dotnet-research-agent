@@ -3,18 +3,20 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// OpenAI (Chat Completions) adapter'ı — go-live primary sağlayıcı (paid). Varsayılan model gpt-6-luna.
-/// Çıktı tavanı <c>max_completion_tokens</c> ile gider
-/// (GPT-5/o-serisi max_tokens kabul etmez). API anahtarı SSM→env (<c>Ai:OpenAI:ApiKey</c> / <c>OPENAI_API_KEY</c>).
-/// Key yoksa IsConfigured=false → AiRouter sağlayıcıyı atlar; politikada başka sağlayıcı olmadığı için çağrı hata verir.
+/// OpenAI (Chat Completions) adapter — the primary (paid) provider. The default model comes from
+/// <see cref="AiOptions"/> (<c>OpenAI.Model</c>). The output ceiling is sent as <c>max_completion_tokens</c>
+/// (GPT-5 / o-series reject max_tokens). The API key comes from configuration or the environment
+/// (<c>Ai:OpenAI:ApiKey</c> / <c>OPENAI_API_KEY</c>, for example loaded from AWS SSM into the environment).
+/// Without a key IsConfigured=false → <see cref="AiRouter"/> skips the provider; if the policy lists no other
+/// provider, the call then fails.
 /// </summary>
 public sealed class OpenAIAdapter : IAiProviderAdapter
 {
     private const string Endpoint = "https://api.openai.com/v1/chat/completions";
-    /// <summary>Araçlı + muhakemeli yüzeylerin yolu; policy'de <c>UseResponsesApi</c> ile seçilir.</summary>
+    /// <summary>The path for surfaces that use tools together with reasoning; selected in the policy with <c>UseResponsesApi</c>.</summary>
     private const string ResponsesEndpoint = "https://api.openai.com/v1/responses";
 
     private readonly HttpClient _httpClient;
@@ -39,16 +41,16 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
 
     public bool IsConfigured => !string.IsNullOrWhiteSpace(_apiKey);
 
-    /// <summary>gpt-5 ailesi çok-modlu: görseller mesaj içeriğine `image_url` parçası olarak eklenir.</summary>
+    /// <summary>The gpt-5 family is multimodal: images are added to the message content as `image_url` parts.</summary>
     public bool SupportsImages => true;
 
     public async Task<AiCompletionResult> CompleteAsync(AiCompletionRequest request, CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
-            throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
+            throw new InvalidOperationException("OpenAI API key is not configured (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
-        // Politika modeli (varsa) tek-atış yolunda da geçerli; yoksa sağlayıcı varsayılanı. Adapter'ı
-        // doğrudan çağıran servis modeli kendisi taşımalı (e-posta triyajı bunu unutmuştu, VIT-1132).
+        // The policy model (if any) also applies on the single-shot path; otherwise the provider default. A
+        // service that calls the adapter directly must carry the model itself (one such caller forgot it once).
         var model = request.Model ?? _options.OpenAI.Model;
         var systemText = AiAdapterHelpers.ComposeSystemPrompt(request);
 
@@ -58,8 +60,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
 
         if (request.Images is { Count: > 0 })
         {
-            // Çok-modlu istekte user content bir DİZİ olur: önce metin, sonra görseller.
-            // düşük çözünürlükte okunmuyor; bu iş zaten görüntü başına birkaç sent.
+            // With images, the user content becomes an ARRAY: the text first, then the images.
+            // detail "high": the images are not readable at low resolution, and the job costs only a few
+            // cents per image anyway.
             var parts = new List<object> { new { type = "text", text = request.UserPrompt } };
             parts.AddRange(request.Images.Select(image => (object)new
             {
@@ -77,17 +80,18 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         {
             ["model"] = model,
             ["messages"] = messages,
-            // Reasoning'i kıs → hızlı (25s timeout + prod 30s API-GW altında) + ucuz; grounded iş
-            // reasoning gerektirmez. Politika yazmadıysa `low`: `minimal` bugünkü modellerde 400 veriyor (bkz. helper).
+            // Keep reasoning low → fast (under the 25 s timeout and, in production, the 30 s API Gateway limit)
+            // and cheap; grounded work does not need reasoning. When the policy does not say, `low`: `minimal`
+            // returns 400 on current models (see the helper).
             ["reasoning_effort"] = request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(),
         };
         if (request.MaxOutputTokens is int maxTokens)
-            body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
+            body["max_completion_tokens"] = maxTokens;   // GPT-5 / o-series: NOT max_tokens
         if (!string.IsNullOrWhiteSpace(request.ResponseJsonSchema))
-            body["response_format"] = new { type = "json_object" };   // prompt "JSON" içermeli (OpenAI şartı)
+            body["response_format"] = new { type = "json_object" };   // the prompt must contain "JSON" (an OpenAI requirement)
 
         using var httpRequest = new HttpRequestMessage(HttpMethod.Post, Endpoint);
-        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey!); // IsConfigured guard ile non-null garanti
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey!); // non-null is guaranteed by the IsConfigured guard
         httpRequest.Content = new StringContent(
             JsonSerializer.Serialize(body), Encoding.UTF8, "application/json");
 
@@ -96,7 +100,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("OpenAI çağrısı başarısız ({Status}): {Body}",
+            _logger.LogWarning("OpenAI call failed ({Status}): {Body}",
                 (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
             throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
         }
@@ -105,7 +109,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         var root = doc.RootElement;
 
         if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
-            throw new HttpRequestException($"OpenAI boş yanıt döndürdü: {AiAdapterHelpers.Truncate(json)}");
+            throw new HttpRequestException($"OpenAI returned an empty response: {AiAdapterHelpers.Truncate(json)}");
 
         var text = string.Empty;
         if (choices[0].TryGetProperty("message", out var message) &&
@@ -114,16 +118,17 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             text = contentEl.GetString() ?? string.Empty;
         }
 
-        // Akıl yürütme token'ları `max_completion_tokens` tavanından harcanır. Efor yükseltilip
-        // tavan yükseltilmezse model düşünmeye tüm bütçeyi yer ve içerik BOŞ döner — HTTP 200,
-        // finish_reason "length", çağıran taraf ise "çıktı okunamadı" der ve sebep görünmez.
+        // Reasoning tokens are spent from the `max_completion_tokens` ceiling. If the effort is raised
+        // without raising the ceiling, the model spends the whole budget on thinking and the content comes
+        // back EMPTY — HTTP 200, finish_reason "length", while the caller only reports "could not read the
+        // output" and the cause stays invisible.
         var finishReason = choices[0].TryGetProperty("finish_reason", out var fr) ? fr.GetString() : null;
         if (string.IsNullOrEmpty(text) && finishReason == "length")
         {
             throw new HttpRequestException(
-                $"OpenAI çıktı token tavanına takıldı ve içerik üretemedi (model={model}, " +
-                $"tavan={request.MaxOutputTokens}, efor={request.ReasoningEffort ?? "varsayılan"}). " +
-                "Akıl yürütme bütçeyi tüketmiş olabilir — MaxOutputTokens'ı yükseltin ya da eforu düşürün.");
+                $"OpenAI hit the output token ceiling and produced no content (model={model}, " +
+                $"ceiling={request.MaxOutputTokens}, effort={request.ReasoningEffort ?? "default"}). " +
+                "Reasoning may have consumed the budget — raise MaxOutputTokens or lower the reasoning effort.");
         }
 
         return new AiCompletionResult
@@ -135,30 +140,31 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         };
     }
 
-    /// <summary>Tool-calling çok-turlu sohbet (support chatbot). Aynı endpoint/şema; tools + tool_calls eklenir.</summary>
+    /// <summary>Multi-turn chat with tool calling (for example a support chatbot). Same endpoint and schema; tools + tool_calls are added.</summary>
     public async Task<AiChatResult> CompleteChatAsync(AiChatRequest request, CancellationToken cancellationToken = default)
     {
         if (!IsConfigured)
-            throw new InvalidOperationException("OpenAI API anahtarı tanımlı değil (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
+            throw new InvalidOperationException("OpenAI API key is not configured (Ai:OpenAI:ApiKey / OPENAI_API_KEY).");
 
         if (request.UseResponsesApi)
             return await CompleteViaResponsesAsync(request, cancellationToken);
 
-        var model = request.Model ?? _options.OpenAI.Model;   // policy override (ör. admin → gpt-5)
+        var model = request.Model ?? _options.OpenAI.Model;   // policy override (e.g. gpt-5 for one task)
         var hasTools = request.Tools is { Count: > 0 };
         var body = new Dictionary<string, object?>
         {
             ["model"] = model,
             ["messages"] = AiAdapterHelpers.BuildChatMessages(request.Messages),
-            // Policy override öncelikli (v6.8: public chat "medium" ister); yoksa modele göre
-            // varsayılan. Araç varlığı değeri etkiler — yeni kuşak, tool'larla reasoning kabul
-            // etmiyor (bkz. helper), o yüzden tool varken override yok sayılır.
+            // The policy override wins (for example a public chat may ask for "medium"); otherwise the
+            // model-dependent default. The presence of tools affects the value — the new generation does
+            // not accept reasoning together with tools (see the helper), so the override is ignored when
+            // tools are present.
             ["reasoning_effort"] = hasTools
                 ? AiAdapterHelpers.ResolveReasoningEffort(hasTools: true)
                 : request.ReasoningEffort ?? AiAdapterHelpers.ResolveReasoningEffort(),
         };
         if (request.MaxOutputTokens is int maxTokens)
-            body["max_completion_tokens"] = maxTokens;   // GPT-5/o-serisi: max_tokens DEĞİL
+            body["max_completion_tokens"] = maxTokens;   // GPT-5 / o-series: NOT max_tokens
         if (hasTools)
         {
             body["tools"] = AiAdapterHelpers.BuildToolsArray(request.Tools!);
@@ -173,26 +179,27 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("OpenAI chat çağrısı başarısız ({Status}): {Body}", (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
+            _logger.LogWarning("OpenAI chat call failed ({Status}): {Body}", (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
             throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
         }
         return AiAdapterHelpers.ParseChatResult(json, AiProvider.OpenAI, model);
     }
 
     /// <summary>
-    /// Aynı sözleşmenin <c>/v1/responses</c> üzerinden koşan hâli. Çağıran (runner) bu yolu bilmez —
-    /// mesaj listesi verir, sonuç alır; tek fark dönen <see cref="AiChatResult.ResponseId"/>.
+    /// The same contract, running over <c>/v1/responses</c>. The caller (the agent runner) does not know about
+    /// this path — it passes a message list and gets a result back; the only difference is the returned
+    /// <see cref="AiChatResult.ResponseId"/>.
     ///
-    /// İki kazanç: (1) araçlarla birlikte reasoning gönderilebiliyor — chat/completions'ta gpt-5.6
-    /// bunu 400 ile reddediyor; (2) <c>previous_response_id</c> ile geçmiş OpenAI'da kalıyor, model
-    /// araç turları arasında kendi planını yeniden kurmuyor.
+    /// Two gains: (1) reasoning can be sent together with tools — on chat/completions gpt-5.6 rejects that
+    /// with a 400; (2) with <c>previous_response_id</c> the history stays at OpenAI, so the model does not
+    /// rebuild its own plan between tool turns.
     ///
-    /// ⚠️ Zincir GEÇMİŞİ taşır ama <c>instructions</c>'ı TAŞIMAZ — sistem promptu her turda
-    /// yeniden gönderilir (aşağıda, gerekçesiyle).
+    /// ⚠️ The chain carries the HISTORY but NOT <c>instructions</c> — the system prompt is sent again on
+    /// every turn (see below, with the reason).
     ///
-    /// ⚠️ Zincir <c>store</c>'a bağlı: <c>store:false</c> ile ikinci tur 400 "not found" veriyor
-    /// (ölçüldü). Yani zincir açıkken istek/yanıt OpenAI'da 30 gün duruyor — bilinçli karar,
-    /// gerekirse <c>DELETE /v1/responses/{id}</c> ile erken silinebilir.
+    /// ⚠️ The chain depends on <c>store</c>: with <c>store:false</c> the second turn fails with 400 "not found"
+    /// (measured). So while the chain is on, the request and response are kept at OpenAI for 30 days — a
+    /// deliberate decision; they can be deleted early with <c>DELETE /v1/responses/{id}</c> if needed.
     /// </summary>
     private async Task<AiChatResult> CompleteViaResponsesAsync(AiChatRequest request, CancellationToken cancellationToken)
     {
@@ -202,19 +209,20 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         var body = new Dictionary<string, object?>
         {
             ["model"] = model,
-            // Zincir varsa YALNIZ yeni kalemler gider (araç sonuçları); yoksa konuşmanın tamamı.
+            // With a chain ONLY the new items go (the tool results); otherwise the whole conversation.
             ["input"] = BuildResponsesInput(request),
         };
 
-        // System prompt Responses'ta ayrı bir alan — ve zincirin HER turunda tekrar gönderilir.
-        // ⚠️ Sezgiye ters ama OpenAI'ın sözleşmesi bu: `previous_response_id` ile `instructions`
-        // DEVRALINMAZ (kasıtlı — sistem mesajını turlar arası değiştirebilesin diye). Eskiden
-        // burada "önceki yanıt onu zaten taşıyor" varsayımıyla atlanıyordu ve sonuç şuydu: araç
-        // turundan sonraki cevap KURALSIZ üretiliyordu. 29 Ağu 2026'da support eval'inde ölçüldü —
-        // 2. turun girdisi 6.077 → 460 token'a düşüyor (prompt yok) ve model tam o turda ekran
-        // görüntüsü istiyor, [[action:...]] işaretini düşürüyor, ekran tarifi veriyor; yani promptun
-        // yasakladığı üç davranış birden geri geliyor. Tekrarın bedeli neredeyse sıfır: aynı önek
-        // olduğu için önbellekten geliyor.
+        // The system prompt is a separate field in Responses — and it is sent again on EVERY turn of the chain.
+        // ⚠️ Counter-intuitive, but this is OpenAI's contract: `instructions` are NOT inherited through
+        // `previous_response_id` (deliberately, so that you can change the system message between turns).
+        // This used to be skipped here on the assumption that "the previous response already carries it", and
+        // the result was that the answer after a tool turn was produced WITHOUT any rules. Measured on
+        // 29 Aug 2026 in an eval of a support chat — the input of the 2nd turn drops from 6,077 to 460 tokens
+        // (no prompt) and in exactly that turn the model asks for a screenshot, drops the action marker the
+        // prompt requires and describes the screen; that is, all three behaviours the prompt forbids come
+        // back at once. Repeating the prompt costs almost nothing: it is the same prefix, so it is served
+        // from the cache.
         var system = request.Messages.FirstOrDefault(m => m.Role == "system")?.Content;
         if (!string.IsNullOrWhiteSpace(system)) body["instructions"] = system;
 
@@ -222,8 +230,8 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             body["previous_response_id"] = request.PreviousResponseId;
 
         if (request.MaxOutputTokens is int maxTokens) body["max_output_tokens"] = maxTokens;
-        // Değer OLDUĞU GİBİ gider: bu API'nin varlık sebebi zaten araçla birlikte muhakemeye izin
-        // vermesi. "minimal" yalnız eski kuşakta geçerli, burada kullanılmaz.
+        // The value is sent AS IS: the whole point of this API is that it allows reasoning together with
+        // tools. "minimal" is valid only on the old generation and is not used here.
         if (!string.IsNullOrWhiteSpace(request.ReasoningEffort))
             body["reasoning"] = new { effort = request.ReasoningEffort };
         if (hasTools)
@@ -240,13 +248,13 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         var json = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogWarning("OpenAI responses çağrısı başarısız ({Status}): {Body}", (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
+            _logger.LogWarning("OpenAI responses call failed ({Status}): {Body}", (int)response.StatusCode, AiAdapterHelpers.Truncate(json));
             throw new HttpRequestException($"OpenAI {(int)response.StatusCode}: {AiAdapterHelpers.Truncate(json)}");
         }
         return ParseResponsesResult(json, model);
     }
 
-    /// <summary>Responses şemasında araç tanımı: function alanları düz, iç içe değil.</summary>
+    /// <summary>A tool definition in the Responses schema: the function fields are flat, not nested.</summary>
     private static List<object> BuildResponsesTools(IReadOnlyList<AiToolDefinition> tools) =>
         tools.Select(t => (object)new
         {
@@ -257,9 +265,9 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         }).ToList();
 
     /// <summary>
-    /// Mesaj listesi → Responses "input" kalemleri. Zincir varsa yalnız son turda eklenen araç
-    /// sonuçları gönderilir; geçmişi tekrar göndermek hem token israfı hem de "aynı şey iki kez
-    /// anlatıldı" hâli demek.
+    /// Message list → Responses "input" items. With a chain only the tool results added in the last turn
+    /// are sent; sending the history again would both waste tokens and tell the model "the same thing
+    /// twice".
     /// </summary>
     private static List<object> BuildResponsesInput(AiChatRequest request)
     {
@@ -277,13 +285,13 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
             switch (m.Role)
             {
                 case "system":
-                    break;   // instructions alanına gitti
+                    break;   // it went into the instructions field
                 case "tool":
                     items.Add(new { type = "function_call_output", call_id = m.ToolCallId, output = m.Content ?? string.Empty });
                     break;
                 case "assistant" when m.ToolCalls is { Count: > 0 }:
-                    // Zincirsiz yeniden oynatma (önceki turun id'si yoksa): modelin geçmiş araç
-                    // taleplerini de kaleme dökmek gerekir, yoksa sonuçlar sahipsiz kalır.
+                    // Replay without a chain (when there is no id for the previous turn): the model's past tool
+                    // requests have to be written out as items too, otherwise the results are left orphaned.
                     foreach (var call in m.ToolCalls)
                         items.Add(new { type = "function_call", call_id = call.Id, name = call.Name, arguments = call.ArgumentsJson });
                     if (!string.IsNullOrWhiteSpace(m.Content))
@@ -298,7 +306,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         return items;
     }
 
-    /// <summary>Listenin sonundaki kesintisiz araç mesajı sayısı = bu turda eklenen sonuçlar.</summary>
+    /// <summary>Number of uninterrupted tool messages at the end of the list = the results added in this turn.</summary>
     private static int CountTrailingToolMessages(IReadOnlyList<AiChatMessage> messages)
     {
         var n = 0;
@@ -306,7 +314,7 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
         return n;
     }
 
-    /// <summary>Responses yanıtı: output dizisi (reasoning · function_call · message) + usage.</summary>
+    /// <summary>A Responses reply: the output array (reasoning · function_call · message) + usage.</summary>
     private static AiChatResult ParseResponsesResult(string json, string model)
     {
         using var doc = JsonDocument.Parse(json);
@@ -335,8 +343,8 @@ public sealed class OpenAIAdapter : IAiProviderAdapter
                             foreach (var part in content.EnumerateArray())
                                 if (part.TryGetProperty("text", out var pt)) text.Append(pt.GetString());
                         break;
-                    // "reasoning" kalemi bilerek okunmuyor: içeriği bize ait değil, zincirde
-                    // OpenAI tarafında taşınıyor. Loglamak da istemeyiz.
+                    // The "reasoning" item is deliberately not read: its content is not ours, it is carried
+                    // on the OpenAI side in the chain. We would not want to log it either.
                 }
             }
         }

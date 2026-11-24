@@ -1,37 +1,32 @@
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Llm;
 
 /// <summary>
-/// İstek-kapsamlı (scoped) AMBIENT kimlik bağlamı — AI trace satırının KİMLİK sütunlarını doldurur.
-/// Üst katmanlar (endpoint, <see cref="AiRouter"/>, agent servisleri) burayı doldurur; en alttaki
-/// <see cref="TracingAiProviderAdapter"/> okur. Böylece tenant/danışan kimliği modele giden ANONİM
-/// payload'a KARIŞMADAN (golden rule: "kim" oturumdan, "ne" prompt'tan) trace'e AYRI sütun olarak yazılır.
+/// Request-scoped, ambient identity for traces. Upper layers (an endpoint, the router, an agent)
+/// fill it; <see cref="TracingAiProviderAdapter"/> reads it at the bottom of the stack. Identity
+/// therefore reaches the trace as separate columns and never enters the anonymous payload that goes
+/// to the model: "who" comes from the session, "what" from the prompt.
 ///
-/// Bir scope'ta birden çok AI çağrısı olabilir (agent tool-loop); <see cref="CorrelationId"/> aynı
-/// mantıksal işlemin (fallback denemeleri) satırlarını gruplar — <see cref="BeginOperation"/> ile tazelenir.
+/// One scope can make several AI calls (an agent's tool loop); <see cref="CorrelationId"/> groups the
+/// rows of one logical operation, including its fallback attempts. <see cref="BeginOperation"/> renews it.
 /// </summary>
 public sealed class AiTraceContext
 {
-    public string? TenantId { get; set; }
-    public Guid? UserId { get; set; }
-    public Guid? ClientId { get; set; }
-    public string? ContextKey { get; set; }
+    /// <summary>Ownership scope of the call (tenant, account, project), set by the host from its session.</summary>
+    public string? ScopeId { get; set; }
+
+    public string? UserId { get; set; }
+
     public string? ConversationId { get; set; }
+
+    /// <summary>Where the call comes from ("research", "support-chat"...).</summary>
     public string? Surface { get; set; }
 
-    /// <summary>
-    /// ANONİM ziyaretçinin kalıcı cihaz kimliği (`vit_device_id`) — <c>SiteVisits</c>'in taşıdığının
-    /// AYNISI, dolayısıyla sohbet ile gezinme geçmişi JOIN'lenebilir. Giriş yapmış kullanıcıda gerek
-    /// yok (orada <see cref="TenantId"/>/<see cref="UserId"/> zaten var); bu, public yüzeyin kimliğidir.
-    /// </summary>
-    public string? DeviceId { get; set; }
+    /// <summary>Host-specific extra columns (device id, session id...).</summary>
+    public Dictionary<string, string> Properties { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Anonim ziyaretçinin o anki gezinme oturumu (`vit_site_session`).</summary>
-    public string? SessionId { get; set; }
-
-    /// <summary>Aynı mantıksal işlemin (fallback denemeleri) satırlarını gruplayan kimlik.</summary>
     public Guid? CorrelationId { get; private set; }
 
-    /// <summary>Yeni bir mantıksal AI işlemi başlat — taze correlation id ata (fallback turları paylaşır).</summary>
+    /// <summary>Starts a new logical AI operation with a fresh correlation id; fallback attempts share it.</summary>
     public Guid BeginOperation()
     {
         var id = Guid.NewGuid();

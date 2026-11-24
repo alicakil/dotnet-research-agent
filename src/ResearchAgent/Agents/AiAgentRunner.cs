@@ -1,19 +1,19 @@
-using Microsoft.Extensions.Options;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Agents;
 
 /// <summary>
-/// Tool-calling (agentic) loop'unu çalıştıran PAYLAŞILAN runner — in-app support + (ileride) public
-/// marketing chatbot İKİSİ de kullanır. Akış: sağlayıcı seç (policy + fallback) → CompleteChatAsync →
-/// model araç çağırırsa dispatch et + sonucu mesaja ekle → tekrar → final metin (veya iterasyon limiti).
-/// Metering/gating BURADA YOK — çağıran servis (SupportAgentService vb.) yapar. Kimlik runner'a girmez;
-/// tenant tool dispatcher'ın içinde OTURUMDAN gelir (golden rule).
+/// Runs the tool-calling (agentic) loop: pick a provider (policy order, with fallback) →
+/// <see cref="IAiProviderAdapter.CompleteChatAsync"/> → when the model calls tools, dispatch them and
+/// append their results → call again → final text, or stop at the iteration limit.
+/// Metering and access checks are not done here: the calling service does them. Identity never enters
+/// the runner; the tool dispatcher reads it from the session.
 /// </summary>
 public interface IAiAgentRunner
 {
     Task<AiAgentResult> RunAsync(
-        AiTaskType taskType,
+        string taskType,
         string systemPrompt,
         IReadOnlyList<AiChatMessage> conversation,
         IReadOnlyList<AiToolDefinition> tools,
@@ -29,15 +29,16 @@ public sealed class AiAgentResult
     public required AiUsage Usage { get; init; }
 
     /// <summary>
-    /// Döngüyü bitiren araç çağrıldıysa onun adı (<see cref="AiToolDefinition.EndsLoop"/>, VIT-1047 devir); yoksa null.
-    /// Doluysa <see cref="Text"/> kullanıcıya gidecek cevap değildir: çağıran işi başka yere (öbür asistana) verir.
+    /// Name of the loop-ending tool when one was called (<see cref="AiToolDefinition.EndsLoop"/>, a hand-off);
+    /// otherwise null. When set, <see cref="Text"/> is not the answer for the user: the caller hands the
+    /// work over to someone else, for example another assistant.
     /// </summary>
     public string? EndedByTool { get; init; }
 }
 
 public sealed class AiAgentRunner : IAiAgentRunner
 {
-    private const int MaxIterations = 8;   // güvenlik tavanı (sonsuz araç-döngüsünü kes; admin SQL birkaç tur sürebilir)
+    private const int MaxIterations = 8;   // safety ceiling: cuts an endless tool loop
 
     private readonly IEnumerable<IAiProviderAdapter> _adapters;
     private readonly AiOptions _options;
@@ -51,7 +52,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
     }
 
     public async Task<AiAgentResult> RunAsync(
-        AiTaskType taskType,
+        string taskType,
         string systemPrompt,
         IReadOnlyList<AiChatMessage> conversation,
         IReadOnlyList<AiToolDefinition> tools,
@@ -60,7 +61,7 @@ public sealed class AiAgentRunner : IAiAgentRunner
     {
         var policy = _options.GetPolicy(taskType);
 
-        // Çalışan mesaj listesi: system + konuşma; araç turları buraya eklenir.
+        // Working message list: system + conversation; tool turns are appended here.
         var messages = new List<AiChatMessage>(conversation.Count + 1)
         {
             new() { Role = "system", Content = systemPrompt },
@@ -71,8 +72,8 @@ public sealed class AiAgentRunner : IAiAgentRunner
         AiProvider provider = default;
         var model = string.Empty;
 
-        // Responses zincirinin son halkası. Mesaj listesi buna RAĞMEN eksiksiz tutulur: zincir
-        // yoksa (chat/completions yolu, id'siz yanıt) tek elimizde kalan tam geçmiştir.
+        // Last link of a Responses API chain. The message list is still kept complete: without a chain
+        // (chat/completions path, a response without an id) it is the only full history we have.
         string? previousResponseId = null;
 
         for (var iteration = 0; iteration < MaxIterations; iteration++)
@@ -95,20 +96,21 @@ public sealed class AiAgentRunner : IAiAgentRunner
             totalCached += result.Usage.CachedInputTokens;
             provider = result.Provider;
             model = result.Model;
-            // chat/completions döndüyse null olur → sonraki tur tam listeyle gider.
+
+            // Null after a chat/completions turn: the next turn then sends the full list.
             previousResponseId = result.ResponseId;
 
-            // Araç çağrısı yoksa → final cevap.
+            // No tool call: this is the final answer.
             if (result.ToolCalls.Count == 0)
                 return Done(result.Text ?? string.Empty, provider, model, totalIn, totalOut, totalCached);
 
-            // Döngüyü bitiren araç (devir): dispatch yok, bir tur daha yok; aynı turdaki öbür çağrılar da koşmaz,
-            // çünkü işi artık başkası yapacak. Bu turun maliyeti yine toplamda.
+            // A loop-ending tool (hand-off): no dispatch and no further turn; other calls of the same turn
+            // do not run either, because someone else takes the work over. This turn's cost still counts.
             var ending = result.ToolCalls.FirstOrDefault(c => tools.Any(t => t.EndsLoop && t.Name == c.Name));
             if (ending is not null)
                 return Done(result.Text ?? string.Empty, provider, model, totalIn, totalOut, totalCached, ending.Name);
 
-            // assistant turn'ü (araç talepleriyle) + her aracın sonucunu (tool mesajı) ekle.
+            // Append the assistant turn (with its tool calls) and one tool message per result.
             messages.Add(new AiChatMessage { Role = "assistant", Content = result.Text, ToolCalls = result.ToolCalls });
             foreach (var call in result.ToolCalls)
             {
@@ -119,16 +121,17 @@ public sealed class AiAgentRunner : IAiAgentRunner
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Agent tool '{Tool}' başarısız.", call.Name);
-                    toolResult = JsonSerializer.Serialize(new { error = "tool failed" });   // model toparlasın
+                    _logger.LogWarning(ex, "Agent tool '{Tool}' failed.", call.Name);
+                    toolResult = JsonSerializer.Serialize(new { error = "tool failed" });   // let the model recover
                 }
+
                 messages.Add(new AiChatMessage { Role = "tool", ToolCallId = call.Id, Content = toolResult });
             }
         }
 
-        _logger.LogWarning("AiAgentRunner iterasyon limitine ({Max}) ulaştı (task={Task}).", MaxIterations, taskType);
+        _logger.LogWarning("AiAgentRunner hit the iteration limit ({Max}) (task={Task}).", MaxIterations, taskType);
         return Done(
-            "Bu konuda tam yardımcı olamadım — lütfen WhatsApp ya da destek görüşmesiyle bize ulaşın.",
+            "I could not finish this request. Please try again or ask a person for help.",
             provider, model, totalIn, totalOut, totalCached);
     }
 
@@ -142,7 +145,6 @@ public sealed class AiAgentRunner : IAiAgentRunner
         Usage = new AiUsage { InputTokens = inTok, OutputTokens = outTok, CachedInputTokens = cachedTok },
     };
 
-    /// <summary>Politikadaki sağlayıcıları sırayla dener; ilk başarılı sonucu döner.</summary>
     private async Task<AiChatResult> CallWithFallbackAsync(AiTaskPolicy policy, AiChatRequest req, CancellationToken ct)
     {
         Exception? lastError = null;
@@ -150,10 +152,12 @@ public sealed class AiAgentRunner : IAiAgentRunner
         {
             var adapter = _adapters.FirstOrDefault(a => a.Provider == providerType && a.IsConfigured);
             if (adapter is null) continue;
+
             try { return await adapter.CompleteChatAsync(req, ct); }
-            catch (Exception ex) { lastError = ex; _logger.LogWarning(ex, "Agent provider {Provider} başarısız; fallback.", providerType); }
+            catch (Exception ex) { lastError = ex; _logger.LogWarning(ex, "Agent provider {Provider} failed; falling back.", providerType); }
         }
-        throw new AiCompletionFailedException("AI servisi geçici olarak kullanılamıyor. Lütfen biraz sonra tekrar deneyin.", lastError);
+
+        throw new AiCompletionFailedException("The AI service is temporarily unavailable. Please try again shortly.", lastError);
     }
 
     private static JsonElement ParseArgs(string argumentsJson)

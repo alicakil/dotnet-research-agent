@@ -1,15 +1,16 @@
 using System.Text;
 using System.Text.Json;
 
-namespace WebApi.Services.Ai;
+namespace ResearchAgent.Web;
 
-/// <summary>Tek bir arama sonucu satırı (ham SERP: başlık + snippet + link).</summary>
+/// <summary>A single search result row (raw SERP: title + snippet + link).</summary>
 public sealed record WebSearchResult(string Title, string Snippet, string Url);
 
 /// <summary>
-/// Arama çağrısının sonucu. <see cref="Failed"/> ayrı taşınır çünkü "sonuç yok" ile
-/// "arama çalışmadı" TAMAMEN farklı iki durum: ilki normal (zayıf dijital iz — ölçtük,
-/// SESSİZ KALMAMALI — yoksa ücretli katman bir gün ölür ve kimse fark etmez.
+/// The outcome of a search call. <see cref="Failed"/> is carried separately because "no results" and
+/// "the search did not work" are two COMPLETELY different situations: the first is normal (a weak digital
+/// footprint — we measured it), the second is a failure and must NOT be silent — otherwise the paid
+/// tier can die one day and nobody notices.
 /// </summary>
 public sealed record WebSearchOutcome(
     IReadOnlyList<WebSearchResult> Results,
@@ -24,10 +25,10 @@ public sealed record WebSearchOutcome(
 }
 
 /// <summary>
-/// Ham web arama sağlayıcısı. Ayrı arayüz çünkü sağlayıcı değiştirilebilir olmalı
-/// (Serper ucuz ham SERP verir → özeti biz çıkarıyoruz; Tavily/Exa içerik çıkarımı dahil
-/// ama ~10× pahalı). <see cref="IsConfigured"/> false ise arama katmanı SESSİZCE atlanır —
-/// derin araştırma yine adayın kendi URL'leriyle çalışır.
+/// A raw web search provider. A separate interface because the provider must be swappable
+/// (Serper returns cheap raw SERP data → we extract the summary ourselves; Tavily/Exa include content
+/// extraction but cost ~10× more). When <see cref="IsConfigured"/> is false the search layer is skipped
+/// SILENTLY — deep research can still work from the subject's own URLs.
 /// </summary>
 public interface IWebSearchProvider
 {
@@ -35,15 +36,15 @@ public interface IWebSearchProvider
     Task<WebSearchOutcome> SearchAsync(string query, int maxResults, CancellationToken ct = default);
 
     /// <summary>
-    /// Aramayı bir ülkenin Google'ından yapar (<paramref name="countryCode"/>, ISO-3166 alfa-2; null = ülkesiz). Kaydolan
-    /// uzmanın araması (VIT-1308): İrlanda'daki bir dermatolog İrlanda sonuçlarında öne çıkar. Ülke desteklemeyen sağlayıcı
-    /// ülkesiz arar.
+    /// Searches through one country's Google (<paramref name="countryCode"/>, ISO-3166 alpha-2; null = no country),
+    /// so that a subject based in Ireland ranks higher in Irish results. A provider that does not support
+    /// countries searches without one.
     /// </summary>
     Task<WebSearchOutcome> SearchAsync(string query, int maxResults, string? countryCode, CancellationToken ct = default) =>
         SearchAsync(query, maxResults, ct);
 }
 
-/// <summary>Arama servislerinin ülke parametresi (<c>gl</c>): iki harfli ülke kodu küçük harfle, değilse null.</summary>
+/// <summary>The country parameter (<c>gl</c>) of the search services: a two-letter country code in lower case, otherwise null.</summary>
 public static class WebSearchCountry
 {
     public static string? Gl(string? countryCode)
@@ -54,17 +55,17 @@ public static class WebSearchCountry
 }
 
 /// <summary>
-/// ESKALASYON arama sağlayıcısı — hızlı SERP kademesinden AYRI bir seam. Kasten ayrı bir tip:
-/// bu sağlayıcı pahalı ve yavaştır (ölçüm: 45–95 sn/sorgu), o yüzden zincire halka olarak
-/// KONULMAZ; yalnız hızlı kademe yetersiz kaldığında tek seferlik çağrılır. Ayrı arayüz olması
-/// DI'da yanlışlıkla <see cref="IWebSearchProvider"/> yerine geçmesini de engeller.
+/// ESCALATION search provider — a seam SEPARATE from the fast SERP tier. A deliberately separate type:
+/// this provider is expensive and slow (measured: 45–95 s per query), so it is NOT put into the chain
+/// as a link; it is called once, and only when the fast tier falls short. Being a separate interface
+/// also stops it from silently standing in for <see cref="IWebSearchProvider"/> in DI.
 /// </summary>
 public interface IEscalationSearchProvider : IWebSearchProvider;
 
 /// <summary>
-/// Serper.dev (Google SERP proxy) — ~$1/1000 sorgu. Anahtar: <c>Ai:Serper:ApiKey</c>
-/// (SSM: /vitena/{env}/ai/serper-api-key → env Ai__Serper__ApiKey). Anahtar yoksa
-/// IsConfigured=false döner ve arama adımı atlanır (özellik yine çalışır, sadece daha az kanıt).
+/// Serper.dev (Google SERP proxy) — about $1 per 1,000 queries. Key: <c>Ai:Serper:ApiKey</c>
+/// (environment variable <c>Ai__Serper__ApiKey</c>). Without a key, IsConfigured returns false and
+/// the search step is skipped (the feature still works, just with less evidence).
 /// </summary>
 public sealed class SerperSearchProvider : IWebSearchProvider
 {
@@ -103,14 +104,14 @@ public sealed class SerperSearchProvider : IWebSearchProvider
             if (!response.IsSuccessStatusCode)
             {
                 var status = (int)response.StatusCode;
-                // 401/403 = anahtar sorunu, 429 = kota/rate — ikisi de "insan müdahalesi gerek".
-                _logger.LogWarning("Serper arama başarısız: HTTP {Status} (anahtar/kota kontrol edilmeli)", status);
+                // 401/403 = key problem, 429 = quota/rate limit — both "need a human".
+                _logger.LogWarning("Serper search failed: HTTP {Status} (check the key/quota)", status);
                 return WebSearchOutcome.Fail($"HTTP {status}");
             }
 
             using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
             if (!doc.RootElement.TryGetProperty("organic", out var organic) || organic.ValueKind != JsonValueKind.Array)
-                return WebSearchOutcome.Empty;   // gerçekten sonuç yok — hata değil
+                return WebSearchOutcome.Empty;   // genuinely no results — not an error
 
             var results = new List<WebSearchResult>();
             foreach (var item in organic.EnumerateArray().Take(maxResults))
@@ -126,8 +127,8 @@ public sealed class SerperSearchProvider : IWebSearchProvider
         }
         catch (Exception ex)
         {
-            // Arama opsiyonel bir katman — patlaması derin araştırmayı durdurmaz, ama görünür olur.
-            _logger.LogWarning(ex, "Serper arama hatası: {Query}", query);
+            // Search is an optional layer — a failure does not stop deep research, but it stays visible.
+            _logger.LogWarning(ex, "Serper search error: {Query}", query);
             return WebSearchOutcome.Fail(ex.GetType().Name);
         }
     }
